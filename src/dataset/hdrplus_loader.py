@@ -1,0 +1,66 @@
+import os
+import subprocess
+from pathlib import Path
+from shutil import rmtree
+
+from loguru import logger
+
+from utils import get_git_root
+
+
+class HDRPlusDatasetDownloader:
+    def __init__(self, enable_multiprocessing: bool = False) -> None:
+        """The HDRPlus dataset loader with multiprocessing capabilities for Google Cloud Storage.
+
+        Args:
+            enable_multiprocessing (bool): If True, enables multiprocessing for 'gsutil' commands
+                when copying data from Google Cloud Storage, which can speed up transfers
+                for large numbers of files. At the moment fails on MacOS. Defaults to False.
+
+        """
+        self.multiprocessing_enabled = enable_multiprocessing
+        mp_flag = "-o GSUtil:parallel_process_count=1" if self.multiprocessing_enabled else ""
+        self.cmd_template = f"gsutil {mp_flag} -m cp -r gs://{{source_path}} {{destination_path}}"
+
+    def download(
+        self,
+        source_path: str | Path,
+        destination_path: str | Path | None = None,
+        force_download: bool = False,
+    ) -> None:
+        """Downloads the HDR+ dataset from a Google Storage bucket to a local destination.
+
+        Args:
+            source_path (str | Path): The source path or Google Storage bucket URI (e.g., path to the dataset).
+            destination_path (str | Path | None, optional): The local directory where the dataset
+                will be saved. If None, it defaults to a subfolder within 'data/raw/hdrplus_dataset'
+                relative to the git root. Defaults to None.
+            force_download (bool, optional): Remove and re-download if True. Defaults to False.
+
+        Returns:
+            None
+
+        Raises:
+            subprocess.CalledProcessError: If the `gsutil` command fails during the download process.
+
+        """
+        source_path = Path(source_path)
+
+        if not destination_path:
+            # TODO (andrei aksionau): that should be taken from a config file
+            destination_path = get_git_root() / "data/raw/hdrplus_dataset" / source_path.stem
+
+        if destination_path.exists():
+            if not force_download:
+                print("Folder already exists. Force download was disabled.")
+                return
+            rmtree(destination_path)
+        os.makedirs(destination_path, exist_ok=True)
+
+        cmd = self.cmd_template.format(source_path=source_path, destination_path=destination_path)
+
+        try:
+            subprocess.run(cmd.split(), check=True)
+            logger.info("Download completed.")
+        except subprocess.CalledProcessError as e:
+            print(f"Command failed with return code {e.returncode}")
