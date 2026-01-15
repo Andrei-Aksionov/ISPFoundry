@@ -5,6 +5,7 @@ from shutil import rmtree
 
 from loguru import logger
 
+from configs.config_loader import config
 from utils import get_git_root
 
 
@@ -47,8 +48,7 @@ class HDRPlusDatasetDownloader:
         source_path = Path(source_path)
 
         if not destination_path:
-            # TODO (andrei aksionau): that should be taken from a config file
-            destination_path = get_git_root() / "data/raw/hdrplus_dataset" / source_path.stem
+            destination_path = get_git_root() / config.data.hdrplus_dataset / source_path.stem
 
         if destination_path.exists():
             if not force_download:
