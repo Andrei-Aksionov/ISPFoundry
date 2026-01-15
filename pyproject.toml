@@ -1,0 +1,18 @@
+[project]
+name = "ISPFoundry"
+version = "0.1.0"
+description = "Image Signal Processing from Scratch in a clear and structured way."
+readme = "README.md"
+requires-python = ">=3.14"
+
+dependencies = [
+    "pre-commit>=4.5.1",
+    "ruff>=0.14.11",
+]
+
+[dependency-groups]
+dev = [ ]
+
+[build-system]
+requires = ["setuptools>=80.0"]
+build-backend = "setuptools.build_meta"

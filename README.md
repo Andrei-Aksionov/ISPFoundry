@@ -1,0 +1,46 @@
+<p>
+    <h1 align="center"><i>ISP Foundry</i></h1>
+    <h3 align="center">Image Signal Processing</h3>
+    <h6 align="center">From scratch</h6>
+</p>
+
+**ISPFoundry** is a clear and structured walkthrough of the Image Signal Processing (ISP) pipeline — from raw sensor data to final RGB images.
+
+This project breaks down the ISP process into distinct, understandable steps. It starts with traditional image processing algorithms (like bilinear demosaicing and white balance) and gradually explores machine learning–based replacements for individual blocks or combined stages.
+
+## Goals
+
+- Provide a clean, step-by-step implementation of a standard ISP pipeline
+- Help students, researchers, and developers understand how raw sensor data is processed
+- Explore how machine learning can replace or enhance traditional ISP blocks
+
+## Pipeline Stages
+
+**Implemented components:**
+
+- [ ] *Merging burst of images*
+- [ ] *Black level subtraction*
+- [ ] *Linearization*
+- [ ] *Lens shading correction*
+- [ ] *White balancing*
+- [ ] *Demosaicing*
+- [ ] *Color correction*
+- [ ] *Local tone mapping*
+- [ ] *Global tone mapping*
+- [ ] *3d Look-up table (LUT)*
+- [ ] *Sharpening*
+
+**Documentation:**
+
+- [ ] Readme for each step
+- [ ] Main readme
+
+**Planned extensions:**
+
+- ML-based demosaicing (CNN-based)
+- Joint demosaicing + color correction with neural networks
+- End-to-end ML pipelines (e.g., CNN or Transformer)
+
+## Resources
+
+- Nice youtube video from TED explaining how cameras in smartphones capture and process images: <https://www.youtube.com/watch?v=7dm2AsJ3-E8>
