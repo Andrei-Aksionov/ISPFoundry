@@ -1,0 +1,35 @@
+name: Test with HDR+ Dataset downloader
+on: [push, pull_request]
+
+jobs:
+  download-and-test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ['3.14']
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }} and install uv
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'uv'
+          uv: true # Install uv CLI
+
+      - name: Install Python dependencies via uv sync
+        run: |
+          # uv sync will use pyproject.toml and uv.lock by default
+          uv sync
+
+      - name: Set up gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: 'gsutil'
+
+      - name: Running tests
+        run: |
+          pytest tests/test_dataloader.py::TestHDRPlusDatasetDownloader -s
