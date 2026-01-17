@@ -13,16 +13,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }} and install uv
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
         with:
-          python-version: ${{ matrix.python-version }}
-          uv: true # Install uv CLI
+          enable-cache: true
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
 
       - name: Install Python dependencies via uv sync
-        run: |
-          # uv sync will use pyproject.toml and uv.lock by default
-          uv sync
+        run: uv sync
 
       - name: Set up gcloud CLI
         uses: google-github-actions/setup-gcloud@v2
@@ -30,5 +30,4 @@ jobs:
           install_components: 'gsutil'
 
       - name: Running tests
-        run: |
-          pytest tests/test_dataloader.py::TestHDRPlusDatasetDownloader -s
+        run: uv run pytest tests/test_dataloader.py::TestHDRPlusDatasetDownloader -s
