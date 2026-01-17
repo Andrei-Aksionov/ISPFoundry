@@ -1,8 +1,10 @@
+import pathlib
+
 from dataset.hdrplus_loader import HDRPlusDatasetDownloader
 
 
 class TestHDRPlusDatasetDownloader:
-    source_path = "hdrplusdata/20171106_subset/bursts/0006_20160722_115157_431"
+    source_path = str(pathlib.PurePosixPath("hdrplusdata/20171106_subset/bursts/0006_20160722_115157_431"))
     expected_folder_name = "0006_20160722_115157_431"
 
     def test_download_default_dst(self, tmp_path) -> None:
