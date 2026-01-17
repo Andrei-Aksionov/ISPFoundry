@@ -19,8 +19,9 @@ class HDRPlusDatasetDownloader:
                 for large numbers of files. At the moment fails on MacOS. Defaults to False.
 
         """
+
         self.multiprocessing_enabled = enable_multiprocessing
-        mp_flag = "-o GSUtil:parallel_process_count=1" if self.multiprocessing_enabled else ""
+        mp_flag = "" if self.multiprocessing_enabled else "-o GSUtil:parallel_process_count=1"
         self.cmd_template = f"gsutil {mp_flag} -m cp -r gs://{{source_path}} {{destination_path}}"
 
     def download(
@@ -45,6 +46,7 @@ class HDRPlusDatasetDownloader:
             subprocess.CalledProcessError: If the `gsutil` command fails during the download process.
 
         """
+
         source_path = Path(source_path)
 
         if not destination_path:
@@ -52,7 +54,7 @@ class HDRPlusDatasetDownloader:
 
         if destination_path.exists():
             if not force_download:
-                print("Folder already exists. Force download was disabled.")
+                logger.info("Folder already exists. Force download was disabled.")
                 return
             rmtree(destination_path)
         os.makedirs(destination_path, exist_ok=True)
@@ -63,4 +65,4 @@ class HDRPlusDatasetDownloader:
             subprocess.run(cmd.split(), check=True)
             logger.info("Download completed.")
         except subprocess.CalledProcessError as e:
-            print(f"Command failed with return code {e.returncode}")
+            raise RuntimeError(f"Command failed with return code {e.returncode}") from e
