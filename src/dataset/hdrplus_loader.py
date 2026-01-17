@@ -1,4 +1,5 @@
 import os
+import platform
 import subprocess
 from pathlib import Path
 from shutil import rmtree
@@ -59,10 +60,12 @@ class HDRPlusDatasetDownloader:
             rmtree(destination_path)
         os.makedirs(destination_path, exist_ok=True)
 
-        cmd = self.cmd_template.format(source_path=source_path, destination_path=destination_path)
+        cmd = self.cmd_template.format(source_path=source_path.as_posix(), destination_path=destination_path)
 
         try:
-            subprocess.run(cmd.split(), check=True)
+            # Windows needs shell=True to find 'gsutil'
+            is_windows = platform.system() == "Windows"
+            subprocess.run(cmd.split(), shell=is_windows, check=True)
             logger.info("Download completed.")
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Command failed with return code {e.returncode}") from e
