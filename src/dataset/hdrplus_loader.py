@@ -30,7 +30,7 @@ class HDRPlusDatasetDownloader:
         source_path: str | Path,
         destination_path: str | Path | None = None,
         force_download: bool = False,
-    ) -> None:
+    ) -> str:
         """Downloads the HDR+ dataset from a Google Storage bucket to a local destination.
 
         Args:
@@ -41,7 +41,7 @@ class HDRPlusDatasetDownloader:
             force_download (bool, optional): Remove and re-download if True. Defaults to False.
 
         Returns:
-            None
+            The folder where data is downloaded.
 
         Raises:
             subprocess.CalledProcessError: If the `gsutil` command fails during the download process.
@@ -51,12 +51,15 @@ class HDRPlusDatasetDownloader:
         source_path = Path(source_path)
 
         if not destination_path:
-            destination_path = get_git_root() / config.data.hdrplus_dataset / source_path.stem
+            destination_path = get_git_root() / config.data.hdrplus_dataset
+            logger.info(f"Destination path wasn't explicitly set. Downloading into `{destination_path}`")
+
+        destination_folder = destination_path / source_path.name
 
         if destination_path.exists():
             if not force_download:
                 logger.info("Folder already exists. Force download was disabled.")
-                return
+                return destination_folder
             rmtree(destination_path)
         os.makedirs(destination_path, exist_ok=True)
 
@@ -67,5 +70,6 @@ class HDRPlusDatasetDownloader:
             is_windows = platform.system() == "Windows"
             subprocess.run(cmd.split(), shell=is_windows, check=True)
             logger.info("Download completed.")
+            return destination_folder
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Command failed with return code {e.returncode}") from e

@@ -9,10 +9,11 @@ class TestHDRPlusDatasetDownloader:
         """Tests the basic download functionality, ensuring all expected files are present and meet minimum size requirements."""
 
         downloader = HDRPlusDatasetDownloader()
-        downloader.download(self.source_path, tmp_path, force_download=True)
+        downloaded_folder = downloader.download(self.source_path, tmp_path, force_download=True)
 
         target_inner_folder = tmp_path / self.expected_folder_name
         assert target_inner_folder.is_dir()
+        assert downloaded_folder == target_inner_folder
 
         folder_content = list(target_inner_folder.iterdir())
         file_names = {p.name for p in folder_content}
@@ -49,8 +50,10 @@ class TestHDRPlusDatasetDownloader:
         downloader = HDRPlusDatasetDownloader()
 
         # First download to establish initial state (force_download=True to ensure it happens)
-        downloader.download(self.source_path, tmp_path, force_download=True)
+        downloaded_folder = downloader.download(self.source_path, tmp_path, force_download=True)
         target_inner_folder = tmp_path / self.expected_folder_name
+        assert target_inner_folder.is_dir()
+        assert downloaded_folder == target_inner_folder
 
         # Record initial timestamps and sizes
         initial_timestamps = {p.name: p.stat().st_mtime for p in target_inner_folder.iterdir()}
@@ -83,7 +86,10 @@ class TestHDRPlusDatasetDownloader:
         assert dummy_file.exists()
 
         # Download with force_download=True. This should clear or overwrite the existing folder.
-        downloader.download(self.source_path, tmp_path, force_download=True)
+        downloaded_folder = downloader.download(self.source_path, tmp_path, force_download=True)
+        target_inner_folder = tmp_path / self.expected_folder_name
+        assert target_inner_folder.is_dir()
+        assert downloaded_folder == target_inner_folder
 
         # Assert that the dummy file is gone
         assert not dummy_file.exists(), "Dummy file was not removed during forced download."
