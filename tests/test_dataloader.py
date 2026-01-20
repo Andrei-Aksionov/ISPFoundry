@@ -1,4 +1,4 @@
-from dataset.hdrplus_loader import HDRPlusDatasetDownloader
+from dataset.hdrplus_downloader import HDRPlusDatasetDownloader
 
 
 class TestHDRPlusDatasetDownloader:
