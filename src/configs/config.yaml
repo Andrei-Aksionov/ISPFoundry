@@ -1,0 +1,4 @@
+data:
+  folder: data
+  raw: ${data.folder}/raw
+  hdrplus_dataset: ${data.raw}/hdrplus_dataset

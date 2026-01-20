@@ -1,15 +1,17 @@
 # https://beta.ruff.rs/docs/rules/
 
-target-version = "py38"
+target-version = "py313"
 
 lint.select = [
   "ANN", # flake8-annotations
   "ARG001", # Unused function argument
+  "D",
   "C4", # flake8-comprehensions
   "E", # pycodestyle Error
   "F", # PyFlakes
   "I001", # isort: unsorted-imports
   "PT", # flake8-pytest-style
+  "T201", # `print` found
   "RET", # flake8-return
   "S", # flake8-bandit
   "SIM", # flake8-simplify
@@ -17,16 +19,18 @@ lint.select = [
 ]
 
 lint.ignore = [
-  "ANN101", # Missing type annotation for self in method
-  "ANN102", # Missing type annotation for cls
   "ANN202", # Missing return type annotation for private function
   "ANN204", # Missing return type annotation for special method `__init__`
   "ANN401", # Dynamically typed expressions (typing.Any) are disallowed in `value`
   "C408", # Unnecessary {obj_type} call (rewrite as a literal)
+  "D100", # Missing docstring in public module
+  "D101", # Missing docstring in public class
+  "D104", # Missing docstring in public package
+  "D202", # No blank lines allowed after function docstring
+  "D401", # First line of docstring should be in imperative mood
   "E402", # Module level import not at top of file
   "E501", # Line too long ({width} > {limit} characters)
   "E731", # Do not assign a lambda expression, use a def
-  "PT004", # Fixture {function} does not return anything, add leading underscore
   "PT007", # Wrong values type in @pytest.mark.parametrize expected {values} of {row}
   "S101", # assert detected
   "S108", # Probable insecure usage of temporary file or directory: "{}"
@@ -38,21 +42,14 @@ lint.ignore = [
 line-length = 120
 
 [lint.per-file-ignores]
-"*/**/unsloth/kernels/*" = [
-  "ALL",
-]
 "__init__.py" = [
   "I001", # isort: unsorted-imports
   "F401", # imported but unused
 ]
-"conftest.py" = [
-  "ANN001", # Missing type annotation for self in method
-  "ANN201", # Missing return type annotation for public function {name}
-  "D102", # Missing docstring in public method
-  "S101", # assert detected
+"*.ipynb" = [
+  "T201", # `print` found
 ]
 "test_*.py" = [
   "ANN", # Type annotations
   "D102", # Missing docstring in public method
-  "S101", # assert detected
 ]

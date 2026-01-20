@@ -3,16 +3,29 @@ name = "ISPFoundry"
 version = "0.1.0"
 description = "Image Signal Processing from Scratch in a clear and structured way."
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.13"
 
 dependencies = [
-    "pre-commit>=4.5.1",
-    "ruff>=0.14.11",
+    "ipykernel>=7.1.0",
+    "loguru>=0.7.3",
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.1",
+    "omegaconf>=2.3.0",
+    "pillow>=12.1.0",
+    "rawpy>=0.25.1",
+    "tifffile>=2026.1.14",
 ]
 
 [dependency-groups]
-dev = [ ]
+dev = [
+    "pre-commit>=4.5.1",
+    "pytest>=9.0.2",
+    "ruff>=0.14.11",
+]
 
 [build-system]
 requires = ["setuptools>=80.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

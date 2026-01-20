@@ -1,0 +1,82 @@
+import math
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+
+def get_git_root() -> Path:
+    """Returns path to the root of the git repository."""
+    try:
+        return next(parent for parent in [Path.cwd()] + list(Path.cwd().parents) if (parent / ".git").is_dir())
+    except StopIteration:
+        raise FileNotFoundError("No .git directory found in any parent directory")
+
+
+def plot_images(
+    images: np.ndarray | list[np.ndarray],
+    titles: str | list[str] | None = None,
+    fig_size: tuple | None = None,
+    inch_width_pre_image: int | None = None,
+    max_per_row: int = 3,
+) -> None:
+    """Display a list of images with optional titles in a grid layout.
+
+    Args:
+        images (np.ndarray or list of np.ndarray): List of images to display.
+        titles (str, list of str, optional): Titles for each image. Defaults to empty strings.
+        fig_size (tuple, optional): Figure size in inches (width, height). If None, calculated automatically.
+        inch_width_pre_image (int, optional): Width in inches per image. Used if fig_size is not provided.
+        max_per_row (int): Maximum number of plot per row to be displayed.
+
+    """
+
+    if isinstance(images, np.ndarray):
+        images = [images]
+
+    if titles is None:
+        titles = [""] * len(images)
+    else:
+        if isinstance(titles, str):
+            titles = [titles]
+        assert len(images) == len(titles), "Titles were provided, but it's number is not equal to the number of images."
+
+    def _find_best_layout(n: int, max_per_row: int = 3):
+        min_per_row = 1 if n == 1 else 2
+        min_reserve = n  # start with the worst case
+        best_nrow, best_ncol = 1, n
+
+        for nrow in range(1, n + 1):
+            ncol = math.ceil(n / nrow)
+            if not min_per_row <= ncol <= max_per_row:
+                continue
+            reserve = nrow * ncol - n
+            if reserve < min_reserve:
+                min_reserve = reserve
+                best_nrow, best_ncol = nrow, ncol
+
+        return best_nrow, best_ncol
+
+    if fig_size is None:
+        img_h, img_w = images[0].shape[:2]
+        best_nrow, best_ncol = _find_best_layout(len(images), max_per_row)
+        aspect_ratio = img_h / img_w
+        base_width = inch_width_pre_image or 6  # base width per image in inches
+        fig_width = base_width * best_ncol
+        fig_height = base_width * aspect_ratio * best_nrow
+        fig_size = (fig_width, fig_height)
+
+    _, axes = plt.subplots(best_nrow, best_ncol, figsize=fig_size)
+    axes = iter(axes.flatten()) if isinstance(axes, np.ndarray) else iter([axes])
+
+    for img, title in zip(images, titles):
+        ax = next(axes)
+        ax.set_title(title)
+        ax.imshow(img, cmap="gray" if img.ndim == 2 else None)
+        ax.axis("off")
+
+    # exhaust remaining axes
+    for ax in axes:
+        ax.axis("off")
+
+    plt.tight_layout()

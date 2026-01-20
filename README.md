@@ -14,6 +14,26 @@ This project breaks down the ISP process into distinct, understandable steps. It
 - Help students, researchers, and developers understand how raw sensor data is processed
 - Explore how machine learning can replace or enhance traditional ISP blocks
 
+## Setup
+
+This project uses [uv](https://github.com/astral-sh/uv) for fast Python package and project management.
+
+- **Install uv**
+
+    On MacOS, you can install it via Homebrew:
+
+    ```bash
+    brew install uv
+    ```
+
+- **Synchronize dependencies**
+
+    This command will create a virtual environment and install all required packages:
+
+    ```bash
+    uv sync
+    ```
+
 ## Pipeline Stages
 
 **Implemented components:**
@@ -43,4 +63,4 @@ This project breaks down the ISP process into distinct, understandable steps. It
 
 ## Resources
 
-- Nice youtube video from TED explaining how cameras in smartphones capture and process images: <https://www.youtube.com/watch?v=7dm2AsJ3-E8>
+- Nice YouTube video from TED explaining how cameras in smartphones capture and process images: <https://www.youtube.com/watch?v=7dm2AsJ3-E8>
