@@ -1,6 +1,8 @@
 import math
+import shutil
 from pathlib import Path
 
+import exiftool
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -11,6 +13,28 @@ def get_git_root() -> Path:
         return next(parent for parent in [Path.cwd()] + list(Path.cwd().parents) if (parent / ".git").is_dir())
     except StopIteration:
         raise FileNotFoundError("No .git directory found in any parent directory")
+
+
+def get_exif_metadata(path: Path) -> dict:
+    """Retrieves EXIF metadata from the specified file using ExifTool.
+
+    Args:
+        path (Path): The path to the image file.
+
+    Returns:
+        dict: A dictionary containing the EXIF metadata.
+
+    Raises:
+        RuntimeError: If ExifTool is not installed on the system.
+
+    """
+    if shutil.which("exiftool") is None:
+        return RuntimeError(
+            "ExifTool needs to be installed on your system (https://exiftool.org/install.html). On MacOS run `brew install exiftool`"
+        )
+
+    with exiftool.ExifToolHelper(common_args=[]) as et:
+        return et.get_metadata(path)
 
 
 def plot_images(
