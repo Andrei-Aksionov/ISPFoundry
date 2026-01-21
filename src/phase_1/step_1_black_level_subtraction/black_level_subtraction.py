@@ -38,11 +38,14 @@ def retrieve_black_levels(raw_image: np.ndarray, metadata: dict[str, typing.Any]
         raise ValueError(f"Expected 4 black level values (e.g. RGGB), got: {black_levels}")
 
     # 2. Verify black level values
-    if any(bl > raw_image.max() for bl in black_levels):
+    white_level = metadata.get("WhiteLevel")
+    if white_level is None or white_level == 0:
+        raise ValueError(f"Metadata should contain a valid WhiteLevel, but instead got: `{white_level}`")
+
+    if any(bl > white_level for bl in black_levels):
         raise ValueError(
-            "Something is wrong with either raw image data or black levels. "
-            f"Max value for RAW image is `{raw_image.max()}` and black levels are `{black_levels}`. "
-            "Black levels cannot be larger than images max pixel value."
+            "Black levels cannot be larger or equal to white level (saturation point), "
+            f"but got black level values: {black_levels} and white level: {white_level}."
         )
 
     return black_levels
