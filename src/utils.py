@@ -37,6 +37,56 @@ def get_exif_metadata(path: Path) -> dict:
         return et.get_metadata(path)
 
 
+def plot_histograms(
+    datasets: list[np.ndarray],
+    titles: None | list[str] = None,
+    xlim: None | tuple[int] = None,
+    plot_comparison: bool = True,
+) -> None:
+    """Plots histograms for two datasets, optionally including a comparison plot.
+
+    Args:
+        datasets (list of np.ndarray): A list containing two numpy arrays representing the datasets.
+        titles (list of str, optional): A list of titles for each dataset. Defaults to None.
+        xlim (tuple, optional): The x-axis limits for the comparison plot. Defaults to None.
+        plot_comparison (bool): Whether to include a third plot comparing the datasets. Defaults to True.
+
+    """
+    assert len(datasets) == 2, "Only two histograms are supported"
+    assert titles is None or len(titles) == len(datasets), (
+        "Number of titles should be equal to number of histograms or be None"
+    )
+    titles = titles or [""] * len(datasets)
+
+    _, axes = plt.subplots(nrows=1, ncols=3 if plot_comparison else 2, figsize=(20, 5))
+    axes = axes.flat
+
+    colors = ("red", "blue")
+
+    # plotting separately
+    for data, title, color in zip(datasets, titles, colors):
+        ax = next(axes)
+        ax.set_title(title)
+        ax.hist(data.ravel(), bins=128, color=color)
+        ax.grid(True)
+
+    # plotting on the same chart
+    if plot_comparison:
+        ax = next(axes)
+        for data, label, color in zip(datasets, titles, colors):
+            ax.set_title(f"{titles[0]} vs {titles[1]}")
+            ax.hist(data.ravel(), bins=128, color=color, label=label, alpha=0.25)
+            ax.grid(True)
+
+        if xlim is not None:
+            ax.set_xlim(xlim)
+
+        if all(titles):
+            ax.legend()
+
+    plt.show()
+
+
 def plot_images(
     images: np.ndarray | list[np.ndarray],
     titles: str | list[str] | None = None,
