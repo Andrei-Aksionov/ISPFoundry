@@ -1,11 +1,7 @@
 import numpy as np
 import pytest
 
-from phase_1.step_1_black_level_subtraction.black_level_subtraction import (
-    normalize_image,
-    retrieve_black_levels,
-    subtract_black_levels,
-)
+from pipeline_steps.black_level_subtraction import normalize_image, retrieve_black_levels, subtract_black_levels
 
 
 @pytest.fixture

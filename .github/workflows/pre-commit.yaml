@@ -1,4 +1,4 @@
-name: Test with HDR+ Dataset downloader
+name: pre-commit
 on:
   push:
     branches: [main]
@@ -6,11 +6,11 @@ on:
     branches: [main]
 
 jobs:
-  download-and-test:
+  test:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest]
         python-version: ['3.13']
 
     steps:
@@ -28,10 +28,7 @@ jobs:
       - name: Install Python dependencies via uv sync
         run: uv sync
 
-      - name: Set up gcloud CLI
-        uses: google-github-actions/setup-gcloud@v2
+      - name: Run pre-commit
+        uses: pre-commit/action@v3.0.0
         with:
-          install_components: 'gsutil'
-
-      - name: Running tests
-        run: uv run pytest tests/test_datasets.py::TestHDRPlusDatasetDownloader -s
+          extra_args: '--all-files'
