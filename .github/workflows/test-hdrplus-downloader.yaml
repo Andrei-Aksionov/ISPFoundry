@@ -34,4 +34,4 @@ jobs:
           install_components: 'gsutil'
 
       - name: Running tests
-        run: uv run pytest tests/test_dataloader.py::TestHDRPlusDatasetDownloader -s
+        run: uv run pytest tests/test_datasets.py::TestHDRPlusDatasetDownloader -s
