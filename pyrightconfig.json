@@ -1,0 +1,25 @@
+{
+  "include": [
+    "src",
+    "notebooks"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    ".venv"
+  ],
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": ["src"]
+    }
+  ],
+  "typeCheckingMode": "off",
+
+  "reportMissingImports": "error",
+  "reportMissingModuleSource": "error",
+
+  "reportUndefinedVariable": "none",
+  "reportAttributeAccessIssue": "none",
+  "reportOperatorIssue": "none",
+  "reportArgumentType": "none"
+}

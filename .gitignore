@@ -113,3 +113,6 @@ cython_debug/
 
 ### Data
 data
+
+### PyRight
+*nbqa_ipynb.py
