@@ -111,6 +111,43 @@ class TestSubtractBlackLevels:
         with pytest.raises(ValueError, match="Raw image must not be of unsigned integer type"):
             subtract_black_levels(image, metadata)
 
+    def test_negative_values_are_preserved(self, sample_raw_image, sample_metadata):
+        # Ensuring at least one green channel value is negative after subtraction
+        sample_metadata["BlackLevel"][0] = sample_raw_image[::2, ::2].max() + 10
+        result = subtract_black_levels(sample_raw_image, sample_metadata)
+        expected = sample_raw_image.copy()
+        black_levels = sample_metadata["BlackLevel"]
+        for idx, black_level in enumerate(black_levels):
+            row_offset, col_offset = divmod(idx, 2)
+            expected[row_offset::2, col_offset::2] -= black_level
+
+        np.testing.assert_array_equal(result, expected)
+        assert np.any(result < 0)
+
+    def test_negative_values_are_preserved_custom_data(self):
+        metadata = {"BlackLevel": [110, 120, 150, 160], "WhiteLevel": 1000}
+        raw_image = np.array(
+            [
+                [100, 110, 120, 130],
+                [140, 150, 160, 170],
+                [180, 190, 200, 210],
+                [220, 230, 240, 250],
+            ],
+            dtype=np.float32,
+        )
+        result = subtract_black_levels(raw_image, metadata)
+        expected = np.array(
+            [
+                [-10.0, -10.0, 10.0, 10.0],
+                [-10.0, -10.0, 10.0, 10.0],
+                [70.0, 70.0, 90.0, 90.0],
+                [70.0, 70.0, 90.0, 90.0],
+            ],
+            dtype=np.float32,
+        )
+
+        np.testing.assert_array_equal(result, expected)
+
 
 class TestNormalizeImage:
     def test_normalize_inplace_false(self, sample_raw_image, sample_metadata):
