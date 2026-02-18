@@ -1,5 +1,6 @@
 import math
 import shutil
+from collections.abc import Sequence
 from pathlib import Path
 
 import exiftool
@@ -8,7 +9,13 @@ import numpy as np
 
 
 def get_git_root() -> Path:
-    """Returns path to the root of the git repository."""
+    """Returns path to the root of the git repository.
+
+    Raises:
+        FileNotFoundError: If no .git directory is found in any parent directory.
+
+    """  # noqa: DOC201
+
     try:
         return next(parent for parent in [Path.cwd()] + list(Path.cwd().parents) if (parent / ".git").is_dir())
     except StopIteration:
@@ -29,7 +36,7 @@ def get_exif_metadata(path: Path) -> dict:
 
     """
     if shutil.which("exiftool") is None:
-        return RuntimeError(
+        raise RuntimeError(
             "ExifTool needs to be installed on your system (https://exiftool.org/install.html). On MacOS run `brew install exiftool`"
         )
 
@@ -38,17 +45,17 @@ def get_exif_metadata(path: Path) -> dict:
 
 
 def plot_histograms(
-    datasets: list[np.ndarray],
-    titles: None | list[str] = None,
-    xlim: None | tuple[int] = None,
+    datasets: Sequence[np.ndarray],
+    titles: None | Sequence[str] = None,
+    xlim: None | Sequence[int] = None,
     plot_comparison: bool = True,
 ) -> None:
     """Plots histograms for two datasets, optionally including a comparison plot.
 
     Args:
-        datasets (list of np.ndarray): A list containing two numpy arrays representing the datasets.
-        titles (list of str, optional): A list of titles for each dataset. Defaults to None.
-        xlim (tuple, optional): The x-axis limits for the comparison plot. Defaults to None.
+        datasets (Sequence of np.ndarray): A list containing two numpy arrays representing the datasets.
+        titles (Sequence of str, optional): A list of titles for each dataset. Defaults to None.
+        xlim (Sequence of int, optional): The x-axis limits for the comparison plot. Defaults to None.
         plot_comparison (bool): Whether to include a third plot comparing the datasets. Defaults to True.
 
     """
@@ -88,8 +95,8 @@ def plot_histograms(
 
 
 def plot_images(
-    images: np.ndarray | list[np.ndarray],
-    titles: str | list[str] | None = None,
+    images: np.ndarray | Sequence[np.ndarray],
+    titles: str | Sequence[str] | None = None,
     fig_size: tuple | None = None,
     inch_width_pre_image: int | None = None,
     max_per_row: int = 3,
@@ -97,8 +104,8 @@ def plot_images(
     """Display a list of images with optional titles in a grid layout.
 
     Args:
-        images (np.ndarray or list of np.ndarray): List of images to display.
-        titles (str, list of str, optional): Titles for each image. Defaults to empty strings.
+        images (np.ndarray or Sequence of np.ndarray): List of images to display.
+        titles (str, Sequence of str, optional): Titles for each image. Defaults to empty strings.
         fig_size (tuple, optional): Figure size in inches (width, height). If None, calculated automatically.
         inch_width_pre_image (int, optional): Width in inches per image. Used if fig_size is not provided.
         max_per_row (int): Maximum number of plot per row to be displayed.

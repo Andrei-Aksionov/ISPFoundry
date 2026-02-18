@@ -1,11 +1,13 @@
 # https://beta.ruff.rs/docs/rules/
 
 target-version = "py313"
+preview = true  # Enables preview rules like DOC
 
 lint.select = [
   "ANN", # flake8-annotations
   "ARG001", # Unused function argument
   "D",
+  "DOC",
   "C4", # flake8-comprehensions
   "E", # pycodestyle Error
   "F", # PyFlakes
@@ -52,4 +54,5 @@ line-length = 120
 "test_*.py" = [
   "ANN", # Type annotations
   "D102", # Missing docstring in public method
+  "DOC201", # `return` is not documented in docstring
 ]

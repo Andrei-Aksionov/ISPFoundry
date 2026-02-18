@@ -65,6 +65,9 @@ def subtract_black_levels(raw_image: np.ndarray, metadata: dict[str, typing.Any]
     Returns:
         np.ndarray: The raw image with black levels subtracted.
 
+    Raises:
+        ValueError: If Raw image dtype is an unsigned integer
+
     """
 
     if np.issubdtype(raw_image.dtype, np.unsignedinteger):
@@ -95,6 +98,9 @@ def normalize_image(raw_image: np.ndarray, metadata: dict[str, typing.Any], inpl
 
     Returns:
         np.ndarray: The normalized image.
+
+    Raises:
+        ValueError: If WhiteLevel from metadata is invalid
 
     """
 
