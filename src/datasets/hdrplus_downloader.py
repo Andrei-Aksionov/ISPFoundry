@@ -1,6 +1,6 @@
 import os
 import platform
-import subprocess
+import subprocess  # noqa: S404
 from pathlib import Path
 from shutil import rmtree
 
@@ -30,7 +30,7 @@ class HDRPlusDatasetDownloader:
         source_path: str | Path,
         destination_path: str | Path | None = None,
         force_download: bool = False,
-    ) -> str:
+    ) -> Path:
         """Downloads the HDR+ dataset from a Google Storage bucket to a local destination.
 
         Args:
@@ -44,7 +44,7 @@ class HDRPlusDatasetDownloader:
             The folder where data is downloaded.
 
         Raises:
-            subprocess.CalledProcessError: If the `gsutil` command fails during the download process.
+            RuntimeError: If the `gsutil` command fails during the download process.
 
         """
 
@@ -53,6 +53,7 @@ class HDRPlusDatasetDownloader:
         if not destination_path:
             destination_path = get_git_root() / config.data.hdrplus_dataset
             logger.info(f"Destination path wasn't explicitly set. Downloading into `{destination_path}`")
+        destination_path = Path(destination_path)
 
         destination_folder = destination_path / source_path.name
 
