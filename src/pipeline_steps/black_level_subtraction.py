@@ -3,6 +3,8 @@ import typing
 import numpy as np
 from loguru import logger
 
+from base import ISPStep, register_step
+
 
 def retrieve_black_levels(raw_image: np.ndarray, metadata: dict[str, typing.Any]) -> np.ndarray:
     """Retrieves black level values from metadata or, if absent, calculates them from the image.
@@ -51,6 +53,7 @@ def retrieve_black_levels(raw_image: np.ndarray, metadata: dict[str, typing.Any]
     return black_levels
 
 
+@register_step(ISPStep.BLACK_LEVEL_SUBTRACTION)
 def subtract_black_levels(raw_image: np.ndarray, metadata: dict[str, typing.Any], inplace: bool = False) -> np.ndarray:
     """Subtracts black levels from the raw image.
 
@@ -88,6 +91,7 @@ def subtract_black_levels(raw_image: np.ndarray, metadata: dict[str, typing.Any]
     return raw_image
 
 
+@register_step(ISPStep.NORMALIZATION)
 def normalize_image(raw_image: np.ndarray, metadata: dict[str, typing.Any], inplace: bool = False) -> np.ndarray:
     """Normalizes the raw image into range [0, 1] using black and white levels.
 

@@ -37,7 +37,8 @@ def get_exif_metadata(path: Path) -> dict:
     """
     if shutil.which("exiftool") is None:
         raise RuntimeError(
-            "ExifTool needs to be installed on your system (https://exiftool.org/install.html). On MacOS run `brew install exiftool`"
+            "ExifTool needs to be installed on your system (https://exiftool.org/install.html). "
+            "On MacOS run `brew install exiftool`"
         )
 
     with exiftool.ExifToolHelper(common_args=[]) as et:

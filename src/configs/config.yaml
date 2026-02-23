@@ -1,4 +1,10 @@
 data:
   folder: data
   raw: ${data.folder}/raw
+  interim: ${data.folder}/interim
   hdrplus_dataset: ${data.raw}/hdrplus_dataset
+
+pipeline:
+  default_steps:
+    - black_level_subtraction
+    - normalization
