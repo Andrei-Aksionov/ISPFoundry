@@ -11,7 +11,8 @@ from utils import get_git_root
 
 class HDRPlusDatasetDownloader:
     def __init__(self, enable_multiprocessing: bool = False) -> None:
-        """The HDRPlus dataset loader with multiprocessing capabilities for Google Cloud Storage.
+        """
+        The HDRPlus dataset loader with multiprocessing capabilities for Google Cloud Storage.
 
         Args:
             enable_multiprocessing (bool): If True, enables multiprocessing for 'gsutil' commands
@@ -30,7 +31,8 @@ class HDRPlusDatasetDownloader:
         destination_path: str | Path | None = None,
         force_download: bool = False,
     ) -> Path:
-        """Downloads the HDR+ dataset from a Google Storage bucket to a local destination.
+        """
+        Downloads the HDR+ dataset from a Google Storage bucket to a local destination.
 
         Args:
             source_path (str | Path): The source path or Google Storage bucket URI (e.g., path to the dataset).

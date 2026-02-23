@@ -11,7 +11,8 @@ from PIL import Image
 
 
 def get_git_root() -> Path:
-    """Returns path to the root of the git repository.
+    """
+    Returns path to the root of the git repository.
 
     Raises:
         FileNotFoundError: If no .git directory is found in any parent directory.
@@ -25,7 +26,8 @@ def get_git_root() -> Path:
 
 
 def get_exif_metadata(path: Path) -> dict:
-    """Retrieves EXIF metadata from the specified file using ExifTool.
+    """
+    Retrieves EXIF metadata from the specified file using ExifTool.
 
     Args:
         path (Path): The path to the image file.
@@ -53,7 +55,8 @@ def plot_histograms(
     xlim: None | Sequence[int] = None,
     plot_comparison: bool = True,
 ) -> None:
-    """Plots histograms for two datasets, optionally including a comparison plot.
+    """
+    Plots histograms for two datasets, optionally including a comparison plot.
 
     Args:
         datasets (Sequence of np.ndarray): A list containing two numpy arrays representing the datasets.
@@ -104,7 +107,8 @@ def plot_images(
     inch_width_pre_image: int | None = None,
     max_per_row: int = 3,
 ) -> None:
-    """Display a list of images with optional titles in a grid layout.
+    """
+    Display a list of images with optional titles in a grid layout.
 
     Args:
         images (np.ndarray or Sequence of np.ndarray): List of images to display.
@@ -167,7 +171,8 @@ def plot_images(
 
 
 def save_ndarray_as_jpg(img: np.ndarray, path: Path) -> None:
-    """Saves a numpy array as a JPEG image, normalizing it if necessary.
+    """
+    Saves a numpy array as a JPEG image, normalizing it if necessary.
 
     Args:
         img (np.ndarray): The input image array. Expected to be in range [0, 1].
