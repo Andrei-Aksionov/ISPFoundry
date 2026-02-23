@@ -25,15 +25,15 @@ def get_git_root() -> Path:
         raise FileNotFoundError("No .git directory found in any parent directory")
 
 
-def get_exif_metadata(path: Path) -> dict:
+def get_exif_metadata(path: Path | Sequence[Path]) -> list[dict]:
     """
     Retrieves EXIF metadata from the specified file using ExifTool.
 
     Args:
-        path (Path): The path to the image file.
+        path (Path or Sequence of Path): The path to the image file.
 
     Returns:
-        dict: A dictionary containing the EXIF metadata.
+        list of dict: A dictionary containing the EXIF metadata.
 
     Raises:
         RuntimeError: If ExifTool is not installed on the system.
