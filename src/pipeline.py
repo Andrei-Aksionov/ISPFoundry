@@ -1,4 +1,6 @@
+# TODO (andrei aksionau): remove noqa
 # flake8: noqa
+from pathlib import Path
 
 import importlib
 import pkgutil
@@ -8,6 +10,7 @@ import pipeline_steps
 from loguru import logger
 import numpy as np
 from configs.config_loader import config
+from utils import save_ndarray_as_jpg
 
 
 class ISPPipeline:
@@ -32,16 +35,17 @@ class ISPPipeline:
         self,
         raw_img: np.ndarray,
         config: dict[ISPStep, Any] | None = None,
-        return_all_steps: bool = False,
+        save_to_folder: Path | None = None,
     ) -> np.ndarray | list[np.ndarray]:
 
-        config = config or {}
+        if save_to_folder:
+            save_ndarray_as_jpg(raw_img, save_to_folder / "step_0_raw_image.jpg")
 
         processed_img = raw_img.copy()
-        if return_all_steps:
-            processed_imgs = []
+        config = config or {}
 
-        for step in self.steps:
+        for step_idx, step in enumerate(self.steps):
+            print(f"{step=}")
             if step not in ISP_REGISTRY:
                 raise ValueError(f"Step `{step}` has no implementation in pipeline_steps/ folder.")
 
@@ -52,7 +56,7 @@ class ISPPipeline:
 
             processed_img = func(processed_img, **params)
 
-            if return_all_steps:
-                processed_imgs.append((step, processed_img.copy()))
+            if save_to_folder:
+                save_ndarray_as_jpg(processed_img.clip(0, None), save_to_folder / f"step_{step_idx + 1}_{step}.jpg")
 
-        return processed_imgs if return_all_steps else processed_img
+        return processed_img

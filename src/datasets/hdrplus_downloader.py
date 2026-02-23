@@ -1,4 +1,3 @@
-import os
 import platform
 import subprocess  # noqa: S404
 from pathlib import Path
@@ -50,6 +49,7 @@ class HDRPlusDatasetDownloader:
 
         source_path = Path(source_path)
 
+        # TODO (andrei aksionau): confusion with destination_path and destination_folder.
         if not destination_path:
             destination_path = get_git_root() / config.data.hdrplus_dataset
             logger.info(f"Destination path wasn't explicitly set. Downloading into `{destination_path}`")
@@ -62,7 +62,7 @@ class HDRPlusDatasetDownloader:
                 logger.info("Folder already exists. Force download was disabled.")
                 return destination_folder
             rmtree(destination_path)
-        os.makedirs(destination_path, exist_ok=True)
+        destination_path.mkdir(parents=True, exist_ok=True)
 
         cmd = self.cmd_template.format(source_path=source_path.as_posix(), destination_path=destination_path)
 

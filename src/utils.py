@@ -6,6 +6,8 @@ from pathlib import Path
 import exiftool
 import matplotlib.pyplot as plt
 import numpy as np
+from loguru import logger
+from PIL import Image
 
 
 def get_git_root() -> Path:
@@ -162,3 +164,25 @@ def plot_images(
         ax.axis("off")
 
     plt.tight_layout()
+
+
+def save_ndarray_as_jpg(img: np.ndarray, path: Path) -> None:
+    """Saves a numpy array as a JPEG image, normalizing it if necessary.
+
+    Args:
+        img (np.ndarray): The input image array. Expected to be in range [0, 1].
+        path (Path): The destination path for the JPEG file.
+
+    """
+    if img.min() < 0 or img.max() > 1.0:
+        logger.debug(
+            f"The input image has to be normalized in range [0, 1], but got in range [{img.min()}, {img.max()}]. "
+            "Normalizing automatically ..."
+        )
+        img = img.copy() / img.max()
+
+    if not path.parent.exists():
+        path.parent.mkdir(parents=True)
+
+    jpeg_data = (img * 255).clip(0, 255).astype(np.uint8)
+    Image.fromarray(jpeg_data).save(path)
