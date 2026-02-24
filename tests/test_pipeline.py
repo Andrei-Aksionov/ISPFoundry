@@ -92,7 +92,7 @@ class TestISPPipeline(unittest.TestCase):
             patch("pipeline.pkgutil.iter_modules", return_value=[]),
         ):
             pipeline = ISPPipeline()
-            pipeline.run(self.imgs, self.metadata, config_overrides=overrides)
+            pipeline.run(self.imgs, self.metadata, config_overrides=overrides)  # ty:ignore[invalid-argument-type]
 
             _, kwargs = fake_reg[MockStep.STEP_A].call_args
             assert kwargs["param_x"] == 50
