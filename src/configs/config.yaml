@@ -5,7 +5,8 @@ data:
   hdrplus_dataset: ${data.raw}/hdrplus_dataset
 
 links:
-  tree_example_path: hdrplusdata/20171106_subset/bursts/0006_20160722_115157_431
+  tree_example_path: hdrplusdata/20171106_subset/bursts/0006_20160722_115157_431/
+  tree_example_final_path: hdrplusdata/20171106/results_20161014/0006_20160722_115157_431/final.jpg
 
 pipeline:
   default_steps:
