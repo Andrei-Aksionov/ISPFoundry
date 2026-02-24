@@ -25,27 +25,21 @@ class ISPPipeline:
 
         """
         self.steps = steps or config.pipeline.default_steps
-        self.__discover_steps()
+        self._discover_steps()
 
-    def __discover_steps(self) -> None:
-        """
-        Scans the 'pipeline' folder and imports every module found inside.
-
-        This triggers the @register_step decorators.
-        """
+    def _discover_steps(self) -> None:
+        """Scans and imports modules from `pipeline` folder by triggering @register_step decorators."""
 
         logger.info(" Discovering Pipeline Step Implementations ".center(50, "-"))
-        for loader, module_name, is_pkg in pkgutil.iter_modules(pipeline_steps.__path__):
-            full_module_name = f"pipeline_steps.{module_name}"
-            importlib.import_module(full_module_name)
+        for _, module_name, _ in pkgutil.iter_modules(pipeline_steps.__path__):
+            importlib.import_module(f"pipeline_steps.{module_name}")
             logger.info(f"Loaded: {module_name}")
-        logger.info("-" * 50)
 
     def run(
         self,
         raw_imgs: Sequence[np.ndarray],
         metadata: Sequence[dict],
-        config: dict[ISPStep, Any] | None = None,
+        config_overrides: dict[ISPStep, Any] | None = None,
         save_to_folder: Path | None = None,
     ) -> list[np.ndarray]:
         """
@@ -54,12 +48,59 @@ class ISPPipeline:
         Args:
             raw_imgs: A sequence of raw input images (NumPy arrays).
             metadata: A sequence of dictionaries containing metadata for each image.
-            config: An optional dictionary to override default parameters for specific
+            config_overrides: An optional dictionary to override default parameters for specific
                     ISP steps. The keys are ISPStep enum values and values are
                     dictionaries of parameters.
             save_to_folder: An optional Path object. If provided, intermediate and
                             final processed images, as well as performance metrics,
                             will be saved to this folder.
+
+        Returns:
+            A list of processed images as NumPy arrays.
+
+        """
+
+        # 1. Preparation
+        processed_imgs = [ri.copy() for ri in raw_imgs]
+        config_overrides = config_overrides or {}
+        telemetry = []
+
+        if save_to_folder:
+            # always saving the first image from the burst
+            save_ndarray_as_jpg(processed_imgs[0], save_to_folder / "step_0_raw_image.jpg")
+
+        # 2. Execution Loop
+        total_start = perf_counter()
+
+        for step_idx, step in enumerate(self.steps, start=1):
+            step_start = perf_counter()
+            logger.info(f"Executing step {step_idx}/{len(self.steps)} `{step}` ")
+
+            # Execute pipeline step logic
+            processed_imgs = self._execute_step(step, processed_imgs, metadata, config_overrides)
+
+            # Post-step bookkeeping
+            elapsed = timedelta(seconds=perf_counter() - step_start)
+            logger.info(f"Step {step_idx}/{len(self.steps)} `{step}` took {elapsed}")
+
+            if save_to_folder:
+                telemetry.append((step, elapsed))
+                save_ndarray_as_jpg(processed_imgs[0].clip(0, None), save_to_folder / f"step_{step_idx}_{step}.jpg")
+
+        # 3. Finalization
+        total_elapsed = timedelta(seconds=perf_counter() - total_start)
+        logger.info(f"Full run took {total_elapsed}")
+
+        if save_to_folder:
+            self._save_telemetry(save_to_folder, telemetry, total_elapsed)
+
+        return processed_imgs
+
+    def _execute_step(
+        self, step: ISPStep, imgs: list[np.ndarray], metadata: Sequence[dict], config_overrides: dict
+    ) -> list[np.ndarray]:
+        """
+        Handles the actual function lookup and batch application.
 
         Returns:
             A list of processed images as NumPy arrays.
@@ -70,44 +111,19 @@ class ISPPipeline:
 
         """
 
-        if save_to_folder:
-            # always saving the first image from the burst
-            save_ndarray_as_jpg(raw_imgs[0], save_to_folder / "step_0_raw_image.jpg")
-            time_per_step = []
+        if step not in ISP_REGISTRY:
+            raise ValueError(f"Step `{step}` has no implementation in pipeline_steps/ folder.")
 
-        processed_imgs = [ri.copy() for ri in raw_imgs]
-        config = config or {}
+        func = ISP_REGISTRY[step]
+        params = config_overrides.get(step, {})
 
-        run_time_start = perf_counter()
-        for step_idx, step in enumerate(self.steps, start=1):
-            step_time_start = perf_counter()
+        return [func(img, mt, **params) for img, mt in zip(imgs, metadata)]
 
-            if step not in ISP_REGISTRY:
-                raise ValueError(f"Step `{step}` has no implementation in pipeline_steps/ folder.")
+    def _save_telemetry(self, folder: Path, data: list[tuple[ISPStep, timedelta]], total: timedelta) -> None:
+        """Separates file I/O from the main logic flow."""
 
-            func = ISP_REGISTRY[step]
-            params = config.get(step, {})
-            logger.info(f"Executing step {step_idx}/{len(self.steps)} `{step}` ")
-
-            for processed_idx, (processed_img, mt) in enumerate(zip(processed_imgs, metadata)):
-                processed_img = func(processed_img, mt, **params)
-                processed_imgs[processed_idx] = processed_img
-                if save_to_folder and processed_idx == 0:
-                    save_ndarray_as_jpg(processed_img.clip(0, None), save_to_folder / f"step_{step_idx}_{step}.jpg")
-
-            elapsed = timedelta(seconds=perf_counter() - step_time_start)
-            logger.info(f"Step `{step}` executed in {elapsed} sec")
-            if save_to_folder:
-                time_per_step.append((step, elapsed))
-
-        run_elapsed = timedelta(seconds=perf_counter() - run_time_start)
-        logger.info(f"Full run took {run_elapsed} sec")
-        if save_to_folder:
-            with (save_to_folder / "time_per_step.txt").open("w") as f:
-                f.write(f"{'Step name '.ljust(50, '-')} Elapsed in seconds\n\n")
-                for s, t in time_per_step:
-                    f.write(f"{(s + ' ').ljust(50, '.')} {t}\n")
-
-                f.write(f"{'Full pipeline run '.ljust(50, '.')} {run_elapsed}\n")
-
-        return processed_imgs
+        with (folder / "time_per_step.txt").open("w") as f:
+            f.write(f"{'Step name '.ljust(50, '-')} Elapsed\n\n")
+            for name, duration in data:
+                f.write(f"{(name + ' ').ljust(50, '.')} {duration}\n")
+            f.write(f"{'Full pipeline run '.ljust(50, '.')} {total}\n")
