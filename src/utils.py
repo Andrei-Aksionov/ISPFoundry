@@ -6,10 +6,13 @@ from pathlib import Path
 import exiftool
 import matplotlib.pyplot as plt
 import numpy as np
+from loguru import logger
+from PIL import Image
 
 
 def get_git_root() -> Path:
-    """Returns path to the root of the git repository.
+    """
+    Returns path to the root of the git repository.
 
     Raises:
         FileNotFoundError: If no .git directory is found in any parent directory.
@@ -22,14 +25,15 @@ def get_git_root() -> Path:
         raise FileNotFoundError("No .git directory found in any parent directory")
 
 
-def get_exif_metadata(path: Path) -> dict:
-    """Retrieves EXIF metadata from the specified file using ExifTool.
+def get_exif_metadata(path: Path | Sequence[Path]) -> list[dict]:
+    """
+    Retrieves EXIF metadata from the specified file using ExifTool.
 
     Args:
-        path (Path): The path to the image file.
+        path (Path or Sequence of Path): The path to the image file.
 
     Returns:
-        dict: A dictionary containing the EXIF metadata.
+        list of dict: A dictionary containing the EXIF metadata.
 
     Raises:
         RuntimeError: If ExifTool is not installed on the system.
@@ -37,7 +41,8 @@ def get_exif_metadata(path: Path) -> dict:
     """
     if shutil.which("exiftool") is None:
         raise RuntimeError(
-            "ExifTool needs to be installed on your system (https://exiftool.org/install.html). On MacOS run `brew install exiftool`"
+            "ExifTool needs to be installed on your system (https://exiftool.org/install.html). "
+            "On MacOS run `brew install exiftool`"
         )
 
     with exiftool.ExifToolHelper(common_args=[]) as et:
@@ -50,7 +55,8 @@ def plot_histograms(
     xlim: None | Sequence[int] = None,
     plot_comparison: bool = True,
 ) -> None:
-    """Plots histograms for two datasets, optionally including a comparison plot.
+    """
+    Plots histograms for two datasets, optionally including a comparison plot.
 
     Args:
         datasets (Sequence of np.ndarray): A list containing two numpy arrays representing the datasets.
@@ -101,7 +107,8 @@ def plot_images(
     inch_width_pre_image: int | None = None,
     max_per_row: int = 3,
 ) -> None:
-    """Display a list of images with optional titles in a grid layout.
+    """
+    Display a list of images with optional titles in a grid layout.
 
     Args:
         images (np.ndarray or Sequence of np.ndarray): List of images to display.
@@ -161,3 +168,26 @@ def plot_images(
         ax.axis("off")
 
     plt.tight_layout()
+
+
+def save_ndarray_as_jpg(img: np.ndarray, path: Path) -> None:
+    """
+    Saves a numpy array as a JPEG image, normalizing it if necessary.
+
+    Args:
+        img (np.ndarray): The input image array. Expected to be in range [0, 1].
+        path (Path): The destination path for the JPEG file.
+
+    """
+    if img.min() < 0 or img.max() > 1.0:
+        logger.debug(
+            f"The input image has to be normalized in range [0, 1], but got in range [{img.min()}, {img.max()}]. "
+            "Normalizing automatically ..."
+        )
+        img = img.copy() / img.max()
+
+    if not path.parent.exists():
+        path.parent.mkdir(parents=True)
+
+    jpeg_data = (img * 255).clip(0, 255).astype(np.uint8)
+    Image.fromarray(jpeg_data).save(path)

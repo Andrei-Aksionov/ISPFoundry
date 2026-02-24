@@ -1,4 +1,3 @@
-import os
 import platform
 import subprocess  # noqa: S404
 from pathlib import Path
@@ -12,7 +11,8 @@ from utils import get_git_root
 
 class HDRPlusDatasetDownloader:
     def __init__(self, enable_multiprocessing: bool = False) -> None:
-        """The HDRPlus dataset loader with multiprocessing capabilities for Google Cloud Storage.
+        """
+        The HDRPlus dataset loader with multiprocessing capabilities for Google Cloud Storage.
 
         Args:
             enable_multiprocessing (bool): If True, enables multiprocessing for 'gsutil' commands
@@ -31,7 +31,8 @@ class HDRPlusDatasetDownloader:
         destination_path: str | Path | None = None,
         force_download: bool = False,
     ) -> Path:
-        """Downloads the HDR+ dataset from a Google Storage bucket to a local destination.
+        """
+        Downloads the HDR+ dataset from a Google Storage bucket to a local destination.
 
         Args:
             source_path (str | Path): The source path or Google Storage bucket URI (e.g., path to the dataset).
@@ -50,6 +51,7 @@ class HDRPlusDatasetDownloader:
 
         source_path = Path(source_path)
 
+        # TODO (andrei aksionau): confusion with destination_path and destination_folder.
         if not destination_path:
             destination_path = get_git_root() / config.data.hdrplus_dataset
             logger.info(f"Destination path wasn't explicitly set. Downloading into `{destination_path}`")
@@ -62,7 +64,7 @@ class HDRPlusDatasetDownloader:
                 logger.info("Folder already exists. Force download was disabled.")
                 return destination_folder
             rmtree(destination_path)
-        os.makedirs(destination_path, exist_ok=True)
+        destination_path.mkdir(parents=True, exist_ok=True)
 
         cmd = self.cmd_template.format(source_path=source_path.as_posix(), destination_path=destination_path)
 

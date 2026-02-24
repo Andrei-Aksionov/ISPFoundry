@@ -3,9 +3,12 @@ import typing
 import numpy as np
 from loguru import logger
 
+from base import ISPStep, register_step
+
 
 def retrieve_black_levels(raw_image: np.ndarray, metadata: dict[str, typing.Any]) -> np.ndarray:
-    """Retrieves black level values from metadata or, if absent, calculates them from the image.
+    """
+    Retrieves black level values from metadata or, if absent, calculates them from the image.
 
     Args:
         raw_image (np.ndarray): The input raw image.
@@ -51,8 +54,10 @@ def retrieve_black_levels(raw_image: np.ndarray, metadata: dict[str, typing.Any]
     return black_levels
 
 
+@register_step(ISPStep.BLACK_LEVEL_SUBTRACTION)
 def subtract_black_levels(raw_image: np.ndarray, metadata: dict[str, typing.Any], inplace: bool = False) -> np.ndarray:
-    """Subtracts black levels from the raw image.
+    """
+    Subtracts black levels from the raw image.
 
     Raw sensor data contains an offset introduced by the camera’s sensor and readout electronics.
     Even when no light hits the sensor, the output signal is not zero due to this offset, known as the black level.
@@ -88,8 +93,10 @@ def subtract_black_levels(raw_image: np.ndarray, metadata: dict[str, typing.Any]
     return raw_image
 
 
+@register_step(ISPStep.NORMALIZATION)
 def normalize_image(raw_image: np.ndarray, metadata: dict[str, typing.Any], inplace: bool = False) -> np.ndarray:
-    """Normalizes the raw image into range [0, 1] using black and white levels.
+    """
+    Normalizes the raw image into range [0, 1] using black and white levels.
 
     Args:
         raw_image (np.ndarray): The input raw image.

@@ -1,4 +1,13 @@
 data:
   folder: data
   raw: ${data.folder}/raw
+  interim: ${data.folder}/interim
   hdrplus_dataset: ${data.raw}/hdrplus_dataset
+
+links:
+  tree_example_path: hdrplusdata/20171106_subset/bursts/0006_20160722_115157_431
+
+pipeline:
+  default_steps:
+    - black_level_subtraction
+    - normalization
