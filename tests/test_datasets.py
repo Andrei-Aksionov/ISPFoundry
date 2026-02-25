@@ -9,7 +9,9 @@ class TestHDRPlusDatasetDownloader:
         """Tests the basic download functionality, ensuring all expected files are present and meet minimum size requirements."""
 
         downloader = HDRPlusDatasetDownloader()
-        downloaded_folder = downloader.download(self.source_path, tmp_path, force_download=True)
+        downloaded_folder = downloader.download(
+            self.source_path, tmp_path / self.expected_folder_name, force_download=True
+        )
 
         target_inner_folder = tmp_path / self.expected_folder_name
         assert target_inner_folder.is_dir()
@@ -30,7 +32,7 @@ class TestHDRPlusDatasetDownloader:
 
         # Assert file patterns and properties
         for prefix, suffix, expected_count, min_size in expected_patterns:
-            matching_files = [p for p in folder_content if p.name.startswith(prefix) and p.name.endswith(suffix)]
+            matching_files = [p for p in folder_content if p.match(f"{prefix}*{suffix}")]
             assert len(matching_files) == expected_count, (
                 f"Expected {expected_count} files starting with '{prefix}' and ending with '{suffix}', but got {len(matching_files)}."
             )
@@ -50,7 +52,9 @@ class TestHDRPlusDatasetDownloader:
         downloader = HDRPlusDatasetDownloader()
 
         # First download to establish initial state (force_download=True to ensure it happens)
-        downloaded_folder = downloader.download(self.source_path, tmp_path, force_download=True)
+        downloaded_folder = downloader.download(
+            self.source_path, tmp_path / self.expected_folder_name, force_download=True
+        )
         target_inner_folder = tmp_path / self.expected_folder_name
         assert target_inner_folder.is_dir()
         assert downloaded_folder == target_inner_folder
@@ -86,7 +90,9 @@ class TestHDRPlusDatasetDownloader:
         assert dummy_file.exists()
 
         # Download with force_download=True. This should clear or overwrite the existing folder.
-        downloaded_folder = downloader.download(self.source_path, tmp_path, force_download=True)
+        downloaded_folder = downloader.download(
+            self.source_path, tmp_path / self.expected_folder_name, force_download=True
+        )
         target_inner_folder = tmp_path / self.expected_folder_name
         assert target_inner_folder.is_dir()
         assert downloaded_folder == target_inner_folder
@@ -107,7 +113,7 @@ class TestHDRPlusDatasetDownloader:
         ]
 
         for prefix, suffix, expected_count, min_size in expected_patterns:
-            matching_files = [p for p in folder_content if p.name.startswith(prefix) and p.name.endswith(suffix)]
+            matching_files = [p for p in folder_content if p.match(f"{prefix}*{suffix}")]
             assert len(matching_files) == expected_count
             assert all(p.stat().st_size > min_size for p in matching_files)
 

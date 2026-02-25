@@ -23,7 +23,7 @@ class HDRPlusDatasetDownloader:
 
         self.multiprocessing_enabled = enable_multiprocessing
         mp_flag = "" if self.multiprocessing_enabled else "-o GSUtil:parallel_process_count=1"
-        self.cmd_template = f"gsutil {mp_flag} -m cp -r gs://{{source_path}} {{destination_path}}"
+        self.cmd_template = f"gsutil {mp_flag} -m {{copy_mode}} -r gs://{{source_path}} {{destination_path}}"
 
     def download(
         self,
@@ -51,28 +51,29 @@ class HDRPlusDatasetDownloader:
 
         source_path = Path(source_path)
 
-        # TODO (andrei aksionau): confusion with destination_path and destination_folder.
         if not destination_path:
-            destination_path = get_git_root() / config.data.hdrplus_dataset
+            destination_path = get_git_root() / config.data.hdrplus_dataset / source_path.stem
             logger.info(f"Destination path wasn't explicitly set. Downloading into `{destination_path}`")
         destination_path = Path(destination_path)
-
-        destination_folder = destination_path / source_path.name
 
         if destination_path.exists():
             if not force_download:
                 logger.info("Folder already exists. Force download was disabled.")
-                return destination_folder
+                return destination_path
             rmtree(destination_path)
         destination_path.mkdir(parents=True, exist_ok=True)
 
-        cmd = self.cmd_template.format(source_path=source_path.as_posix(), destination_path=destination_path)
+        cmd = self.cmd_template.format(
+            copy_mode="cp" if source_path.suffix else "rsync",  # rsync doesn't work for single files
+            source_path=source_path.as_posix(),
+            destination_path=destination_path,
+        )
 
         try:
             # Windows needs shell=True to find 'gsutil'
             is_windows = platform.system() == "Windows"
             subprocess.run(cmd.split(), shell=is_windows, check=True)
             logger.info("Download completed.")
-            return destination_folder
+            return destination_path
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Command failed with return code {e.returncode}") from e
