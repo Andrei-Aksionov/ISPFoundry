@@ -11,9 +11,11 @@ dependencies = [
     "matplotlib>=3.10.8",
     "numpy>=2.4.1",
     "omegaconf>=2.3.0",
+    "opencv-python>=4.13.0.92",
     "pillow>=12.1.0",
     "pyexiftool>=0.5.6",
     "rawpy>=0.25.1",
+    "scipy>=1.17.1",
     "tifffile>=2026.1.14",
 ]
 
