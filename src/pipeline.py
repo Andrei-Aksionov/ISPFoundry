@@ -108,16 +108,20 @@ class ISPPipeline:
         metadata: Sequence[dict],
         config_overrides: dict,
     ) -> list[np.ndarray]:
-        # TODO (andrei aksionau): update the docstring
         """
-        Handles the actual function lookup and batch application.
+        Executes a specific ISP step from the ISP registry with provided configuration overrides.
+
+        Args:
+            step: The ISPStep enum value representing the step to execute.
+            image_input: The input images, which can be either a single NumPy array or a list of arrays.
+            metadata: A sequence of dictionaries containing metadata for each image.
+            config_overrides: An optional dictionary containing any configuration overrides specific to this step.
 
         Returns:
             A list of processed images as NumPy arrays.
 
         Raises:
-            ValueError: If an ISP step specified in the pipeline has no
-                        corresponding implementation registered.
+            ValueError: If an ISP step specified in the pipeline has no corresponding implementation registered.
 
         """
 
@@ -130,8 +134,15 @@ class ISPPipeline:
         return func(image_input, metadata, **params)
 
     def _save_telemetry(self, folder: Path, data: list[tuple[ISPStep, timedelta]], total: timedelta) -> None:
-        # TODO (andrei aksionau): update the docstring
-        """Separates file I/O from the main logic flow."""
+        """
+        Saves telemetry data to a text file in the specified folder.
+
+        Args:
+            folder: The path to the directory where the telemetry data will be saved.
+            data: A list of tuples containing step names and elapsed times for each step.
+            total: The total elapsed time for the entire pipeline run.
+
+        """
 
         with (folder / "time_per_step.txt").open("w") as f:
             f.write(f"{'Step name '.ljust(50, '-')} Elapsed\n\n")
