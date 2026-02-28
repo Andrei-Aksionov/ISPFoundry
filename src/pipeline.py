@@ -61,13 +61,13 @@ class ISPPipeline:
         """
 
         # 1. Preparation
-        processed_imgs = [ri.copy() for ri in raw_imgs]
+        image_input = [ri.copy() for ri in raw_imgs]
         config_overrides = config_overrides or {}
         telemetry = []
 
         if save_to_folder:
             # always saving the first image from the burst
-            save_ndarray_as_jpg(processed_imgs[0], save_to_folder / "step_0_raw_image.jpg")
+            save_ndarray_as_jpg(image_input[0], save_to_folder / "step_0_raw_image.jpg")
 
         # 2. Execution Loop
         total_start = perf_counter()
@@ -77,7 +77,7 @@ class ISPPipeline:
             logger.info(f"Executing step {step_idx}/{len(self.steps)} `{step}` ")
 
             # Execute pipeline step logic
-            processed_imgs = self._execute_step(step, processed_imgs, metadata, config_overrides)
+            image_input = self._execute_step(step, image_input, metadata, config_overrides)
 
             # Post-step bookkeeping
             elapsed = timedelta(seconds=perf_counter() - step_start)
@@ -85,7 +85,12 @@ class ISPPipeline:
 
             if save_to_folder:
                 telemetry.append((step, elapsed))
-                save_ndarray_as_jpg(processed_imgs[0].clip(0, None), save_to_folder / f"step_{step_idx}_{step}.jpg")
+                # before burst merging the input contains multiple images
+                payload_to_save = image_input[0] if isinstance(image_input, Sequence) else image_input
+                # after black level subtraction there might be negative values in the image,
+                # that are preserved for better align and merge
+                payload_to_save = payload_to_save.clip(0, None)
+                save_ndarray_as_jpg(payload_to_save, save_to_folder / f"step_{step_idx}_{step}.jpg")
 
         # 3. Finalization
         total_elapsed = timedelta(seconds=perf_counter() - total_start)
@@ -94,11 +99,16 @@ class ISPPipeline:
         if save_to_folder:
             self._save_telemetry(save_to_folder, telemetry, total_elapsed)
 
-        return processed_imgs
+        return image_input
 
     def _execute_step(
-        self, step: ISPStep, imgs: list[np.ndarray], metadata: Sequence[dict], config_overrides: dict
+        self,
+        step: ISPStep,
+        image_input: np.ndarray | list[np.ndarray],
+        metadata: Sequence[dict],
+        config_overrides: dict,
     ) -> list[np.ndarray]:
+        # TODO (andrei aksionau): update the docstring
         """
         Handles the actual function lookup and batch application.
 
@@ -117,9 +127,10 @@ class ISPPipeline:
         func = ISP_REGISTRY[step]
         params = config_overrides.get(step, {})
 
-        return [func(img, mt, **params) for img, mt in zip(imgs, metadata)]
+        return func(image_input, metadata, **params)
 
     def _save_telemetry(self, folder: Path, data: list[tuple[ISPStep, timedelta]], total: timedelta) -> None:
+        # TODO (andrei aksionau): update the docstring
         """Separates file I/O from the main logic flow."""
 
         with (folder / "time_per_step.txt").open("w") as f:

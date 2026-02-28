@@ -54,7 +54,7 @@ def retrieve_black_levels(raw_image: np.ndarray, metadata: dict[str, Any]) -> np
     return black_levels
 
 
-def subtract_black_levels(raw_image: np.ndarray, metadata: dict[str, Any]) -> np.ndarray:
+def subtract_black_levels(raw_image: np.ndarray, metadata: dict[str, Any], inplace: bool = False) -> np.ndarray:
     """
     Subtracts black levels from the raw image.
 
@@ -64,6 +64,7 @@ def subtract_black_levels(raw_image: np.ndarray, metadata: dict[str, Any]) -> np
     Args:
         raw_image (np.ndarray): The input raw image as a NumPy array in float32.
         metadata (dict[str, any]): Dictionary containing metadata, including "BlackLevel".
+        inplace (bool): Whether to perform the operation in-place.
 
     Returns:
         np.ndarray: The raw image with black levels subtracted.
@@ -79,6 +80,8 @@ def subtract_black_levels(raw_image: np.ndarray, metadata: dict[str, Any]) -> np
             f"Expected to be dtype of float32, but got `{raw_image.dtype}`"
         )
 
+    raw_image = raw_image if inplace else raw_image.copy()
+
     black_levels = retrieve_black_levels(raw_image, metadata)
 
     for idx, black_level in enumerate(black_levels):
@@ -88,13 +91,14 @@ def subtract_black_levels(raw_image: np.ndarray, metadata: dict[str, Any]) -> np
     return raw_image
 
 
-def normalize_image(raw_image: np.ndarray, metadata: dict[str, Any]) -> np.ndarray:
+def normalize_image(raw_image: np.ndarray, metadata: dict[str, Any], inplace: bool = False) -> np.ndarray:
     """
     Normalizes the raw image into range [0, 1] using black and white levels.
 
     Args:
         raw_image (np.ndarray): The input raw image.
         metadata (dict[str, any]): Dictionary containing metadata.
+        inplace (bool): Whether to perform the operation in-place.
 
     Returns:
         np.ndarray: The normalized image.
@@ -103,6 +107,8 @@ def normalize_image(raw_image: np.ndarray, metadata: dict[str, Any]) -> np.ndarr
         ValueError: If WhiteLevel from metadata is invalid
 
     """
+
+    raw_image = raw_image if inplace else raw_image.copy()
 
     white_level = metadata.get("WhiteLevel")
     if white_level is None or white_level == 0:
@@ -143,8 +149,8 @@ def apply_black_level_subtraction(
 
     for raw_image, mt in zip(raw_images, metadata):
         raw_image = raw_image if inplace else raw_image.copy()
-        raw_image = subtract_black_levels(raw_image, mt)
-        raw_image = normalize_image(raw_image, mt)
+        raw_image = subtract_black_levels(raw_image, mt, inplace=True)
+        raw_image = normalize_image(raw_image, mt, inplace=True)
         result_images.append(raw_image)
 
     return result_images
