@@ -2,6 +2,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Sequence
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -22,7 +23,10 @@ class MockStep:
 class TestISPPipeline(unittest.TestCase):
     def setUp(self):
         """Setup common data and path for all tests."""
-        self.imgs = [np.zeros((4, 4), dtype=np.float32) for _ in range(2)]
+        self.image_input = [
+            np.array([1] * 4, dtype=np.float32),
+            np.array([2] * 4, dtype=np.float32),
+        ]
         self.metadata = [{"id": 101}, {"id": 102}]
         self.test_dir = Path(tempfile.mkdtemp())
 
@@ -37,8 +41,10 @@ class TestISPPipeline(unittest.TestCase):
         """Helper to create a registry that handles both mock steps."""
         reg = {}
 
-        def dummy_func(img, metadata, **kwargs):
-            return img + 1
+        def dummy_func(image_input, metadata, **kwargs):
+            if isinstance(image_input, Sequence):
+                return [ii * 2 for ii in image_input]
+            return image_input * 2
 
         reg[MockStep.STEP_A] = MagicMock(side_effect=dummy_func)
         reg[MockStep.STEP_B] = MagicMock(side_effect=dummy_func)
@@ -76,11 +82,13 @@ class TestISPPipeline(unittest.TestCase):
             patch("pipeline.pkgutil.iter_modules", return_value=[]),
         ):
             pipeline = ISPPipeline()
-            results = pipeline.run(self.imgs, self.metadata)
+            results = pipeline.run(self.image_input, self.metadata)
 
             assert len(results) == 2
-            assert np.all(results[0] == 2)
-            assert fake_reg[MockStep.STEP_A].call_count == 2
+            np.testing.assert_equal(results[0], self.image_input[0] * len(pipeline.steps) * 2)
+            np.testing.assert_equal(results[1], self.image_input[1] * len(pipeline.steps) * 2)
+            assert fake_reg[MockStep.STEP_A].call_count == 1
+            assert fake_reg[MockStep.STEP_B].call_count == 1
 
     def test_config_overrides_propagation(self):
         fake_reg = self._get_fake_registry()
@@ -92,7 +100,7 @@ class TestISPPipeline(unittest.TestCase):
             patch("pipeline.pkgutil.iter_modules", return_value=[]),
         ):
             pipeline = ISPPipeline()
-            pipeline.run(self.imgs, self.metadata, config_overrides=overrides)  # ty:ignore[invalid-argument-type]
+            pipeline.run(self.image_input, self.metadata, config_overrides=overrides)  # ty:ignore[invalid-argument-type]
 
             _, kwargs = fake_reg[MockStep.STEP_A].call_args
             assert kwargs["param_x"] == 50
@@ -106,7 +114,7 @@ class TestISPPipeline(unittest.TestCase):
         ):
             pipeline = ISPPipeline()
             with pytest.raises(ValueError, match="has no implementation"):
-                pipeline.run(self.imgs, self.metadata)
+                pipeline.run(self.image_input, self.metadata)
 
     def test_file_saving_and_telemetry(self):
         fake_reg = self._get_fake_registry()
@@ -117,7 +125,7 @@ class TestISPPipeline(unittest.TestCase):
             patch("pipeline.pkgutil.iter_modules", return_value=[]),
         ):
             pipeline = ISPPipeline()
-            pipeline.run(self.imgs, self.metadata, save_to_folder=self.test_dir)
+            pipeline.run(self.image_input, self.metadata, save_to_folder=self.test_dir)
 
             assert mock_save.call_count == 3
             assert (self.test_dir / "time_per_step.txt").exists()
