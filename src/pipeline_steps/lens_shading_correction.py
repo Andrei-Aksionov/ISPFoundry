@@ -1,62 +1,94 @@
 import cv2
 import numpy as np
+from loguru import logger
+
+from base import register_step
+from configs.config_loader import config
+from utils import decode_cfa
 
 
-# TODO (andrei aksionau): if to stick to a class variant, find out how to register it to ISP_REGISTRY
-class LensShadingCorrection:
-    def __init__(self, lns_maps, img_size) -> None:
-        self.img_size = img_size
+def align_cfa_pattern(lsc_maps: list[np.ndarray], metadata: list[dict]) -> list[np.ndarray]:
 
-        # TODO (andrei aksionau): most likely lens shading maps are identical across the burst
-        # of images. Thus there is no need to have duplicates
-        self.lns_maps = lns_maps
-        self.interpolated_lns_maps = [self._interpolate(lns_map) for lns_map in lns_maps]
+    # CFA of the lens shading map might be different to the CFA of the image
+    lsc_cfa = config.pipeline.lsc_cfa
+    lsc_maps_reordered = []
 
-    def _interpolate(self, lns_map):
+    for idx, (lsc_map, mt) in enumerate(zip(lsc_maps, metadata)):
+        color_description = mt.get("color_desc")
+        if not color_description:
+            raise ValueError(f"Color description is missing in the metadata[{idx}].")
+        raw_pattern = mt.get("raw_pattern")
+        if raw_pattern is None or raw_pattern.size == 0:
+            raise ValueError(f"Raw pattern is missing in the metadata[{idx}].")
 
-        # Step 1. Change CFA for the LNS to the correct one
-        # From RGGB --> BGGR
-        # TODO (andrei aksionau): CFA conversion should be automatic
-        lns_bggr = lns_map[:, :, [3, 2, 1, 0]]
+        image_cfa = decode_cfa(color_description, raw_pattern)
+        reordering_indices = [image_cfa.index(ch) for ch in lsc_cfa]
+        lsc_maps_reordered.append(lsc_map[:, :, reordering_indices])
 
-        # Step 2. Interpolate
-        height, width = self.img_size
-        interpolated_lns_planes = []
-        for lns_plane in np.unstack(lns_bggr, axis=-1):
-            interpolated_lns_planes.append(
-                cv2.resize(lns_plane, dsize=(width // 2, height // 2), interpolation=cv2.INTER_LINEAR_EXACT)
-            )
+    return lsc_maps_reordered
 
-        # TODO (andrei aksionau): what is better: to stack a list or to pre-allocate a ndarray
-        # and copy into it? If so, then by how much?
-        interpolated_lns_map = np.stack(interpolated_lns_planes, axis=-1, dtype=np.float32)
 
-        return interpolated_lns_map
+def interpolate(lsc_map: np.ndarray, metadata: dict) -> np.ndarray:
 
-    def apply_single_image(self, img, lns_map):
+    width = metadata.get("ImageWidth")
+    if not width:
+        raise ValueError("ImageWidth is missing in the metadata.")
+    height = metadata.get("ImageHeight")
+    if not height:
+        raise ValueError("ImageHeight is missing in the metadata.")
 
-        # TODO (andrei aksionau): is this necessary to de-interleave and interleave again?
-        img_planes = []
-        for idx in range(4):
-            row_offset, col_offset = divmod(idx, 2)
-            img_planes.append(img[row_offset::2, col_offset::2])
+    interpolated_lsc_planes = []
+    for lsc_plane in np.unstack(lsc_map, axis=-1):
+        interpolated_lsc_planes.append(
+            cv2.resize(lsc_plane, dsize=(width // 2, height // 2), interpolation=cv2.INTER_LINEAR_EXACT)
+        )
 
-        corrected_planes = []
-        for img_plane, lns_gain in zip(img_planes, np.unstack(lns_map, axis=-1)):
-            corrected_planes.append(img_plane * lns_gain)
+    interpolated_lsc_map = np.empty((height // 2, width // 2, 4), dtype=np.float32)
+    for idx in range(4):
+        interpolated_lsc_map[..., idx] = interpolated_lsc_planes[idx]
 
-        corrected_img = np.empty_like(img)
-        for idx, corrected_plane in enumerate(corrected_planes):
-            row_offset, col_offset = divmod(idx, 2)
-            corrected_img[row_offset::2, col_offset::2] = corrected_plane
+    return interpolated_lsc_map
 
-        return corrected_img
 
-    def apply(self, imgs):
-        # TODO (andrei aksionau): if no functionality is added, replace with list comprehension
-        result = []
-        for img, lns_map in zip(imgs, self.interpolated_lns_maps):
-            corrected_image = self.apply_single_image(img, lns_map)
-            result.append(corrected_image)
+def apply_single_image(img: np.ndarray, lsc_map: np.ndarray, inplace: bool) -> np.ndarray:
 
-        return result
+    corrected_img = img if inplace else img.copy()
+    for idx in range(4):
+        row_offset, col_offset = divmod(idx, 2)
+        corrected_img[row_offset::2, col_offset::2] *= lsc_map[..., idx]
+
+    return corrected_img
+
+
+@register_step("lens_shading_correction")
+def apply_lens_shading_correction(
+    imgs: list[np.ndarray],
+    metadata: list[dict],
+    lsc_maps: list[np.ndarray],
+    inplace: bool = False,
+) -> list[np.ndarray]:
+
+    # 1. Checks for equality
+    # lsc map is calibrated per device and thus should be identical across the burst
+    if np.equal(lsc_maps[0], lsc_maps[1:]).all():
+        logger.info("All lens shading maps are identical. Reusing the first one.")
+        lsc_maps = [lsc_maps[0]]
+        metadata = [metadata[0]]
+
+    # 2. Aligns lsc maps
+    lsc_maps = align_cfa_pattern(lsc_maps, metadata)
+
+    # 3. Interpolates
+    lsc_maps = [interpolate(lsc_map, mt) for lsc_map, mt in zip(lsc_maps, metadata)]
+
+    # 4. Applies to the burst
+    if len(lsc_maps) == 1 and len(lsc_maps) != len(imgs):
+        lsc_maps = lsc_maps * len(imgs)
+
+    result_imgs = []
+    for img, lsc_map in zip(imgs, lsc_maps):
+        img = img if inplace else img.copy()
+        img = apply_single_image(img, lsc_map, inplace=True)
+        result_imgs.append(img)
+
+    return result_imgs

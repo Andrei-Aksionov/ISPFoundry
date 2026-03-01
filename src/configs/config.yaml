@@ -11,3 +11,10 @@ links:
 pipeline:
   default_steps:
     - black_level_subtraction
+    - lens_shading_correction
+
+  lsc_cfa: # In HDR+ dataset every lens shading map has RGGB pattern
+    - R
+    - Gr
+    - Gb
+    - B
