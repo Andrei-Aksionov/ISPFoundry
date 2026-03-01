@@ -8,6 +8,20 @@ from utils import decode_cfa
 
 
 def align_cfa_pattern(lsc_maps: list[np.ndarray], metadata: list[dict]) -> list[np.ndarray]:
+    """
+    Aligns the CFA pattern of lens shading maps to match that of the images.
+
+    Args:
+        lsc_maps (list[np.ndarray]): List of lens shading maps.
+        metadata (list[dict]): List of metadata dictionaries containing color description and raw pattern information.
+
+    Returns:
+        list[np.ndarray]: List of lens shading maps with aligned CFA patterns.
+
+    Raises:
+        ValueError: If the color description or raw pattern is missing in any metadata.
+
+    """
 
     # CFA of the lens shading map might be different to the CFA of the image
     lsc_cfa = config.pipeline.lsc_cfa
@@ -29,6 +43,20 @@ def align_cfa_pattern(lsc_maps: list[np.ndarray], metadata: list[dict]) -> list[
 
 
 def interpolate(lsc_map: np.ndarray, metadata: dict) -> np.ndarray:
+    """
+    Interpolates the lens shading map to match the dimensions of the original image.
+
+    Args:
+        lsc_map (np.ndarray): Lens shading map.
+        metadata (dict): Metadata dictionary containing width and height information.
+
+    Returns:
+        np.ndarray: Interpolated lens shading map.
+
+    Raises:
+        ValueError: If ImageWidth or ImageHeight is missing in the metadata.
+
+    """
 
     width = metadata.get("ImageWidth")
     if not width:
@@ -51,6 +79,18 @@ def interpolate(lsc_map: np.ndarray, metadata: dict) -> np.ndarray:
 
 
 def apply_single_image(img: np.ndarray, lsc_map: np.ndarray, inplace: bool) -> np.ndarray:
+    """
+    Applies the lens shading map to a single image.
+
+    Args:
+        img (np.ndarray): Input image.
+        lsc_map (np.ndarray): Lens shading map.
+        inplace (bool): If True, modifies the input image in place; otherwise, creates a copy and returns it.
+
+    Returns:
+        np.ndarray: Corrected image with lens shading applied.
+
+    """
 
     corrected_img = img if inplace else img.copy()
     for idx in range(4):
@@ -67,6 +107,19 @@ def apply_lens_shading_correction(
     lsc_maps: list[np.ndarray],
     inplace: bool = False,
 ) -> list[np.ndarray]:
+    """
+    Applies lens shading correction to a burst of images.
+
+    Args:
+        imgs (list[np.ndarray]): List of input images.
+        metadata (list[dict]): List of metadata dictionaries for each image, containing color description and raw pattern information.
+        lsc_maps (list[np.ndarray]): List of lens shading maps corresponding to the images.
+        inplace (bool): If True, modifies the input images in place; otherwise, creates copies and returns them.
+
+    Returns:
+        list[np.ndarray]: List of corrected images with lens shading applied.
+
+    """
 
     # 1. Checks for equality
     # lsc map is calibrated per device and thus should be identical across the burst
