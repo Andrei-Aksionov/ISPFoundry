@@ -1,4 +1,4 @@
-import typing
+from typing import Any, Sequence
 
 import numpy as np
 from loguru import logger
@@ -6,7 +6,7 @@ from loguru import logger
 from base import ISPStep, register_step
 
 
-def retrieve_black_levels(raw_image: np.ndarray, metadata: dict[str, typing.Any]) -> np.ndarray:
+def retrieve_black_levels(raw_image: np.ndarray, metadata: dict[str, Any]) -> np.ndarray:
     """
     Retrieves black level values from metadata or, if absent, calculates them from the image.
 
@@ -54,8 +54,7 @@ def retrieve_black_levels(raw_image: np.ndarray, metadata: dict[str, typing.Any]
     return black_levels
 
 
-@register_step(ISPStep.BLACK_LEVEL_SUBTRACTION)
-def subtract_black_levels(raw_image: np.ndarray, metadata: dict[str, typing.Any], inplace: bool = False) -> np.ndarray:
+def subtract_black_levels(raw_image: np.ndarray, metadata: dict[str, Any], inplace: bool = False) -> np.ndarray:
     """
     Subtracts black levels from the raw image.
 
@@ -81,8 +80,7 @@ def subtract_black_levels(raw_image: np.ndarray, metadata: dict[str, typing.Any]
             f"Expected to be dtype of float32, but got `{raw_image.dtype}`"
         )
 
-    if not inplace:
-        raw_image = raw_image.copy()
+    raw_image = raw_image if inplace else raw_image.copy()
 
     black_levels = retrieve_black_levels(raw_image, metadata)
 
@@ -93,8 +91,7 @@ def subtract_black_levels(raw_image: np.ndarray, metadata: dict[str, typing.Any]
     return raw_image
 
 
-@register_step(ISPStep.NORMALIZATION)
-def normalize_image(raw_image: np.ndarray, metadata: dict[str, typing.Any], inplace: bool = False) -> np.ndarray:
+def normalize_image(raw_image: np.ndarray, metadata: dict[str, Any], inplace: bool = False) -> np.ndarray:
     """
     Normalizes the raw image into range [0, 1] using black and white levels.
 
@@ -111,8 +108,7 @@ def normalize_image(raw_image: np.ndarray, metadata: dict[str, typing.Any], inpl
 
     """
 
-    if not inplace:
-        raw_image = raw_image.copy()
+    raw_image = raw_image if inplace else raw_image.copy()
 
     white_level = metadata.get("WhiteLevel")
     if white_level is None or white_level == 0:
@@ -128,3 +124,33 @@ def normalize_image(raw_image: np.ndarray, metadata: dict[str, typing.Any], inpl
         raw_image[row_offset::2, col_offset::2] /= denominator
 
     return raw_image
+
+
+@register_step(ISPStep.BLACK_LEVEL_SUBTRACTION)
+def apply_black_level_subtraction(
+    raw_images: Sequence[np.ndarray],
+    metadata: Sequence[dict[str, Any]],
+    inplace: bool = False,
+) -> Sequence[np.ndarray]:
+    """
+    Subtracts black levels from the raw image and normalizes into range [0, 1] using black and white levels.
+
+    Args:
+        raw_images (Sequence of np.ndarray): The input raw image.
+        metadata (Sequence of dict[str, any]): Dictionary containing metadata.
+        inplace (bool): Whether to perform the operation in-place.
+
+    Returns:
+        Sequence of np.ndarray: Image after black level subtraction and normalization to range [0, 1].
+
+    """
+
+    result_images = []
+
+    for raw_image, mt in zip(raw_images, metadata):
+        raw_image = raw_image if inplace else raw_image.copy()
+        raw_image = subtract_black_levels(raw_image, mt, inplace=True)
+        raw_image = normalize_image(raw_image, mt, inplace=True)
+        result_images.append(raw_image)
+
+    return result_images

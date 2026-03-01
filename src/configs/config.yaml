@@ -11,4 +11,3 @@ links:
 pipeline:
   default_steps:
     - black_level_subtraction
-    - normalization
