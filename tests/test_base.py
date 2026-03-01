@@ -14,7 +14,7 @@ class TestBase(unittest.TestCase):
 
     def test_register_step_decorator(self):
         """Verify the decorator correctly populates the ISP_REGISTRY."""
-        test_step = ISPStep.NORMALIZATION
+        test_step = ISPStep.LENS_SHADING_CORRECTION
 
         # Ensure it's clean before testing (optional but safer)
         if test_step in ISP_REGISTRY:

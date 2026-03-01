@@ -87,9 +87,9 @@ class ISPPipeline:
                 telemetry.append((step, elapsed))
                 # before burst merging the input contains multiple images
                 payload_to_save = image_input[0] if isinstance(image_input, Sequence) else image_input
-                # after black level subtraction there might be negative values in the image,
-                # that are preserved for better align and merge
-                payload_to_save = payload_to_save.clip(0, None)
+                # if though the image is normalized to range [0, 1] during the pipeline values might
+                # exceed this range which is important statistics and clipping should be done only right before saving
+                payload_to_save = payload_to_save.clip(0, 1)
                 save_ndarray_as_jpg(payload_to_save, save_to_folder / f"step_{step_idx}_{step}.jpg")
 
         # 3. Finalization
