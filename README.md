@@ -39,7 +39,7 @@ This project uses [uv](https://github.com/astral-sh/uv) for fast Python package 
 **Implemented components:**
 
 - [x] *Black level subtraction*
-- [ ] *Lens shading correction*
+- [x] *Lens shading correction*
 - [ ] *Merging burst of images*
 - [ ] *White balancing*
 - [ ] *Demosaicing*
