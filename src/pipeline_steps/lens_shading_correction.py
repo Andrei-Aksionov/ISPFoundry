@@ -78,7 +78,7 @@ def interpolate(lsc_map: np.ndarray, metadata: dict) -> np.ndarray:
     return interpolated_lsc_map
 
 
-def apply_single_image(img: np.ndarray, lsc_map: np.ndarray, inplace: bool) -> np.ndarray:
+def apply_single_image(img: np.ndarray, lsc_map: np.ndarray, inplace: bool = False) -> np.ndarray:
     """
     Applies the lens shading map to a single image.
 
