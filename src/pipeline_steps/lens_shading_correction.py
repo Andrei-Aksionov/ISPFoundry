@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 from loguru import logger
 
-from base import register_step
+from base import ISPStep, register_step
 from configs.config_loader import config
 from utils import decode_cfa
 
@@ -100,7 +100,7 @@ def apply_single_image(img: np.ndarray, lsc_map: np.ndarray, inplace: bool = Fal
     return corrected_img
 
 
-@register_step("lens_shading_correction")
+@register_step(ISPStep.LENS_SHADING_CORRECTION)
 def apply_lens_shading_correction(
     imgs: list[np.ndarray],
     metadata: list[dict],
