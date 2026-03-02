@@ -15,12 +15,12 @@ from utils import save_ndarray_as_jpg
 
 
 class ISPPipeline:
-    def __init__(self, steps: Sequence[ISPStep] | None = None) -> None:
+    def __init__(self, steps: list[ISPStep] | None = None) -> None:
         """
         Initializes the ISPPipeline with an optional sequence of ISP steps.
 
         Args:
-            steps: A sequence of ISPStep objects to be executed. If None,
+            steps: A list of ISPStep objects to be executed. If None,
                    default steps from the configuration will be used.
 
         """
