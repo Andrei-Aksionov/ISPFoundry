@@ -80,7 +80,7 @@ This adds a color-dependent offset, corrupting neutrality.
 
 For RGGB Bayer CFA, black levels differ per color channel:
 
-$$BL = \begin{bmatrix} BL_R & BL_{G_r} \\ BL_{G_b} & BL_B \end{bmatrix}$$
+$$BL = \begin{bmatrix} BL_R & BL_{G_r} \\\\ BL_{G_b} & BL_B \end{bmatrix}$$
 
 Applied per pixel based on its $(x, y)$ position in the Bayer grid:
 $$P(x, y) = RAW(x, y) - BL_c$$

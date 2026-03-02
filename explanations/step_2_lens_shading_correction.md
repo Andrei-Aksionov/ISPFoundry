@@ -76,7 +76,7 @@ $$I(x,y) = P(x,y) \cdot LSM(x,y), \quad \text{where } LSM(x,y) = \frac{1}{V(x,y)
 
 For a Bayer sensor, the correction is applied to all four channels independently:
 
-$$\begin{bmatrix} R' \\ Gr' \\ Gb' \\ B' \end{bmatrix} = \begin{bmatrix} LSM_R & 0 & 0 & 0 \\ 0 & LSM_{Gr} & 0 & 0 \\ 0 & 0 & LSM_{Gb} & 0 \\ 0 & 0 & 0 & LSM_B \end{bmatrix} \cdot \begin{bmatrix} R \\ Gr \\ Gb \\ B \end{bmatrix}$$
+$$\begin{bmatrix} R' \\\\ Gr' \\\\ Gb' \\\\ B' \end{bmatrix} = \begin{bmatrix} LSM_R & 0 & 0 & 0 \\\\ 0 & LSM_{Gr} & 0 & 0 \\\\ 0 & 0 & LSM_{Gb} & 0 \\\\ 0 & 0 & 0 & LSM_B \end{bmatrix} \cdot \begin{bmatrix} R \\\\ Gr \\\\ Gb \\\\ B \end{bmatrix}$$
 
 ---
 
