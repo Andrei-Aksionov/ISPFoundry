@@ -141,10 +141,67 @@ def plot_histograms(
     plt.show()
 
 
+def find_best_layout(n: int, max_per_row: int = 3) -> tuple[int, int]:
+    """
+    Find the best layout for displaying `n` images in a grid, with each row containing at most `max_per_row` images.
+
+    Args:
+        n (int): The number of images to be displayed.
+        max_per_row (int, optional): Maximum number of images per row. Defaults to 3.
+
+    Returns:
+        tuple[int, int]: A tuple `(nrow, ncol)` representing the best number of rows and columns for the layout.
+
+    """
+
+    min_per_row = 1 if n == 1 else 2
+    min_reserve = n  # start with the worst case
+    best_nrow, best_ncol = 1, n
+
+    for nrow in range(1, n + 1):
+        ncol = math.ceil(n / nrow)
+        if not min_per_row <= ncol <= max_per_row:
+            continue
+        reserve = nrow * ncol - n
+        if reserve < min_reserve:
+            min_reserve = reserve
+            best_nrow, best_ncol = nrow, ncol
+
+    return best_nrow, best_ncol
+
+
+def find_best_figsize(
+    images: Sequence[np.ndarray],
+    nrow: int,
+    ncol: int,
+    inch_width_pre_image: int | None = None,
+) -> tuple[float, float]:
+    """
+    Calculate the best figure size for displaying a grid of images.
+
+    Args:
+        images (Sequence of np.ndarray): List of images to be displayed.
+        nrow (int): Number of rows in the grid.
+        ncol (int): Number of columns in the grid.
+        inch_width_pre_image (int, optional): Width in inches per image. Defaults to 6 if not provided.
+
+    Returns:
+        tuple[float, float]: A tuple `(fig_width, fig_height)` representing the calculated figure size.
+
+    """
+
+    img_h, img_w = images[0].shape[:2]
+    aspect_ratio = img_h / img_w
+    base_width = inch_width_pre_image or 6  # base width per image in inches
+    fig_width = base_width * ncol
+    fig_height = base_width * aspect_ratio * nrow
+    return (fig_width, fig_height)
+
+
 def plot_images(
     images: np.ndarray | Sequence[np.ndarray],
     titles: str | Sequence[str] | None = None,
-    fig_size: tuple | None = None,
+    fig_size: tuple[float, float] | None = None,
     inch_width_pre_image: int | None = None,
     max_per_row: int = 3,
 ) -> None:
@@ -154,9 +211,9 @@ def plot_images(
     Args:
         images (np.ndarray or Sequence of np.ndarray): List of images to display.
         titles (str, Sequence of str, optional): Titles for each image. Defaults to empty strings.
-        fig_size (tuple, optional): Figure size in inches (width, height). If None, calculated automatically.
+        fig_size (tuple[float, float], optional): Figure size in inches (width, height). If None, calculated automatically.
         inch_width_pre_image (int, optional): Width in inches per image. Used if fig_size is not provided.
-        max_per_row (int): Maximum number of plot per row to be displayed.
+        max_per_row (int): Maximum number of images per row to be displayed.
 
     """
 
@@ -170,30 +227,9 @@ def plot_images(
             titles = [titles]
         assert len(images) == len(titles), "Titles were provided, but it's number is not equal to the number of images."
 
-    def _find_best_layout(n: int, max_per_row: int = 3):
-        min_per_row = 1 if n == 1 else 2
-        min_reserve = n  # start with the worst case
-        best_nrow, best_ncol = 1, n
-
-        for nrow in range(1, n + 1):
-            ncol = math.ceil(n / nrow)
-            if not min_per_row <= ncol <= max_per_row:
-                continue
-            reserve = nrow * ncol - n
-            if reserve < min_reserve:
-                min_reserve = reserve
-                best_nrow, best_ncol = nrow, ncol
-
-        return best_nrow, best_ncol
-
+    best_nrow, best_ncol = find_best_layout(len(images), max_per_row)
     if fig_size is None:
-        img_h, img_w = images[0].shape[:2]
-        best_nrow, best_ncol = _find_best_layout(len(images), max_per_row)
-        aspect_ratio = img_h / img_w
-        base_width = inch_width_pre_image or 6  # base width per image in inches
-        fig_width = base_width * best_ncol
-        fig_height = base_width * aspect_ratio * best_nrow
-        fig_size = (fig_width, fig_height)
+        fig_size = find_best_figsize(images, best_nrow, best_ncol, inch_width_pre_image)
 
     _, axes = plt.subplots(best_nrow, best_ncol, figsize=fig_size)
     axes = iter(axes.flatten()) if isinstance(axes, np.ndarray) else iter([axes])
