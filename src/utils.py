@@ -12,12 +12,17 @@ from PIL import Image
 
 def get_git_root() -> Path:
     """
-    Returns path to the root of the git repository.
+    Returns the absolute path to the root directory of the current Git repository.
+
+    Traverse up from cwd, checking each parent for `.git`; return its path if found, else raise `FileNotFoundError`.
+
+    Returns:
+        Path: The absolute path to the root of the Git repository.
 
     Raises:
-        FileNotFoundError: If no .git directory is found in any parent directory.
+        FileNotFoundError: If no `.git` directory is found in any parent directory.
 
-    """  # noqa: DOC201
+    """
 
     try:
         return next(parent for parent in [Path.cwd()] + list(Path.cwd().parents) if (parent / ".git").is_dir())
