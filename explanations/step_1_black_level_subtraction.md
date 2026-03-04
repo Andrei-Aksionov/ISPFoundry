@@ -59,8 +59,8 @@ Black level subtraction **must be the first step** in any ISP pipeline:
 
 1. ⭐ **Black Level Subtraction** (mandatory)
 2. Lens Shading Correction
-3. White Balance
-4. Align and Merge burst of images
+3. Align and Merge burst of images
+4. White Balance
 5. Demosaicing
 6. ... Remaining steps
 
