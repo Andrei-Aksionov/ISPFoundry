@@ -5,6 +5,7 @@ from typing import Any, Callable
 class ISPStep(str, Enum):
     BLACK_LEVEL_SUBTRACTION = "black_level_subtraction"
     LENS_SHADING_CORRECTION = "lens_shading_correction"
+    ALIGN_AND_MERGE = "align_and_merge"
 
     def __str__(self) -> str:
         """
