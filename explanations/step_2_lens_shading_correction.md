@@ -42,8 +42,8 @@ Lens shading correction **must occur after black level subtraction** but before 
 
 1. Black Level Subtraction (mandatory)
 2. ⭐ **Lens Shading Correction**
-3. White Balance
-4. Demosaicing
+3. Demosaicing
+4. White Balance
 5. ... Remaining steps
 
 ### Why After Black Level Subtraction?
