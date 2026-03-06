@@ -1,10 +1,9 @@
-import unittest
 from typing import Any
 
 from base import ISP_REGISTRY, ISPStep, register_step
 
 
-class TestBase(unittest.TestCase):
+class TestBase:
     def test_isp_step_enum_str_conversion(self):
         """Verify that the Enum returns its value when cast to string."""
         step = ISPStep.BLACK_LEVEL_SUBTRACTION
