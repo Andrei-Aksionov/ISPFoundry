@@ -61,28 +61,40 @@ def find_best_offset(
         A tuple of (best_dy, best_dx, minimum_sad).
 
     """
+
     height, width = target_proxy.shape
     min_sad = 1e20  # A large float for Numba compatibility
     best_dy, best_dx = 0, 0
 
-    # Exhaustive search within the max_offset window
     for dy in range(-max_offset, max_offset + 1):
         for dx in range(-max_offset, max_offset + 1):
+            # Calculate the intersection of the Target Tile (Ref + offset) and the Target Image
+            # These must be clipped so we don't index out of bounds
+            r_start = max(row_start, -dy, 0)
+            r_end = min(row_start + tile_size, height - dy, height)
+
+            c_start = max(col_start, -dx, 0)
+            c_end = min(col_start + tile_size, width - dx, width)
+
+            if r_start >= r_end or c_start >= c_end:
+                continue
+
+            # Slicing: The target slice must be offset by `dy` and `dx` because it is the 'shifted' version of the reference
+            ref_view = reference_proxy[r_start:r_end, c_start:c_end]
+            tgt_view = target_proxy[r_start + dy : r_end + dy, c_start + dx : c_end + dx]
+
+            # Width Numba per-pixel calculation is faster
+            # np.sum(np.abs(...)) leads to temporary array allocations
             sad = 0.0
+            rows, cols = ref_view.shape
+            for r in range(rows):
+                for c in range(cols):
+                    # Direct subtraction and absolute value
+                    sad += abs(ref_view[r, c] - tgt_view[r, c])
 
-            for tile_ridx in range(tile_size):
-                ref_row = row_start + tile_ridx
-                tgt_row = ref_row + dy
-                if not (0 <= ref_row < height and 0 <= tgt_row < height):
-                    continue
-
-                for tile_cidx in range(tile_size):
-                    ref_col = col_start + tile_cidx
-                    tgt_col = ref_col + dx
-                    if not (0 <= ref_col < height and 0 <= tgt_col < height):
-                        continue
-
-                    sad += abs(reference_proxy[ref_row, ref_col] - target_proxy[tgt_row, tgt_col])
+            # Normalization: If tiles are partially off-image, a smaller area will naturally have a lower SAD.
+            # We divide by area to find the true best match per pixel.
+            sad = sad / (rows * cols)
 
             if sad < min_sad:
                 min_sad = sad
