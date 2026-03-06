@@ -54,17 +54,16 @@ def get_exif_metadata(path: Path | Sequence[Path]) -> list[dict]:
         return et.get_metadata(path)
 
 
-def decode_cfa(color_description: str, raw_pattern: np.ndarray, flatten: bool = True) -> list[str] | list[list[str]]:
+def decode_cfa(color_description: str, raw_pattern: np.ndarray) -> list[str]:
     """
     Decodes a color filter array (CFA) pattern based on the provided color description and raw pixel data.
 
     Args:
         color_description (str): A string describing the color arrangement of the CFA pattern ('rggb', 'gbrg', etc.).
         raw_pattern (np.ndarray): A 2D numpy array representing the raw pixel data from the image sensor.
-        flatten (bool, optional): If True, flattens the decoded pattern into a single list of color strings. Defaults to True.
 
     Returns:
-        list[str] | list[list[str]]: A flattened list of color strings if `flatten` is True, otherwise a 2D list of color strings.
+        list[str]: A flattened list of color strings.
 
     Raises:
         ValueError: If the length of `color_description` does not match the number of channels in `raw_pattern`.
@@ -90,9 +89,7 @@ def decode_cfa(color_description: str, raw_pattern: np.ndarray, flatten: bool = 
             g_idx = 0 if row.index("B") == 1 else 1
             decoded_pattern[row_idx][g_idx] = "Gb"
 
-    if flatten:
-        return [item for sublist in decoded_pattern for item in sublist]
-    return decoded_pattern
+    return [item for sublist in decoded_pattern for item in sublist]
 
 
 def plot_histograms(

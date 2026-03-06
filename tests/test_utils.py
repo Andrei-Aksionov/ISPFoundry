@@ -96,18 +96,6 @@ class TestDecodeCFA:
 
         assert result == expected
 
-    def test_decode_not_flatten(self):
-        """Test decoding without flattening."""
-        raw_pattern = np.array([
-            [0, 1],
-            [2, 3],
-        ])
-
-        result = decode_cfa("RGGB", raw_pattern, flatten=False)
-        expected = [["R", "Gr"], ["Gb", "B"]]
-
-        assert result == expected
-
     def test_decode_invalid_length(self):
         """Test decoding with mismatched length."""
         raw_pattern = np.array([0, 1, 2])

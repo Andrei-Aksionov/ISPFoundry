@@ -1,40 +1,50 @@
 from typing import Any
 
 import numpy as np
-from loguru import logger
 from numba import njit
 from tqdm import trange
 
 from base import ISPStep, register_step
 
 
-def downscale_bayer_to_grayscale(raw_image: np.ndarray) -> np.ndarray:
+def get_luma_proxy(raw_image: np.ndarray, metadata: dict[str, Any]) -> np.ndarray:
     """
     Converts a Bayer RAW image to a half-resolution grayscale proxy for alignment.
 
-    This reduces noise and data volume, making block-matching more robust and
-    computationally efficient.
+    This function implements a weighted luma conversion directly on RAW data.
+    Unlike standard Rec.601/709 conversions, it uses a Green-heavy weighting scheme (70% Green, 15% Red, 15% Blue) to
+    maximize the Signal-to-Noise Ratio (SNR) for motion estimation, while remaining robust to pure Red or Blue
+    high-contrast edges where Green signal may be absent.
 
     Args:
         raw_image: Bayer RAW sensor data of shape (H, W).
+        metadata: Dictionary containing:
+            - 'color_desc': String describing the CFA colors (e.g., "RGBG").
+            - 'raw_pattern': 2x2 list/array mapping CFA indices to the physical pixel grid
 
     Returns:
-        A grayscale image of shape (H//2, W//2) created by averaging 2x2 quads.
+        np.ndarray: Grayscale luma proxy of shape (H//2, W//2) as float32.
+            Dimensions are truncated to the nearest even multiple before processing.
 
     """
+    # 1. Even dimensions check
     height, width = raw_image.shape
-    if height % 2 != 0 or width % 2 != 0:
-        logger.warning(
-            "RAW dimensions are not even. Cropping to ({}, {}) for Bayer consistency.",
-            (height // 2) * 2,
-            (width // 2) * 2,
-        )
-        height = (height // 2) * 2
-        width = (width // 2) * 2
-        raw_image = raw_image[:height, :width]
+    height, width = height & ~1, width & ~1  # down to the nearest multiple of 2
+    raw_image = raw_image[:height, :width]
 
-    # Reshape to (H/2, 2, W/2, 2) and average across the 2x2 block dimensions
-    return raw_image.reshape(height // 2, 2, width // 2, 2).mean(axis=(1, 3))
+    # 2. Map color names to weights
+    color_weights = {"R": 0.15, "G": 0.35, "Gr": 0.35, "Gb": 0.35, "B": 0.15}
+
+    # 3. Build a 2x2 weight mask
+    desc = metadata["color_desc"]  # e.g., "RGBG"
+    pattern = metadata["raw_pattern"]  # e.g., [[2, 3], [1, 0]]
+    # This creates a 2x2 array of weights, e.g., [[0.15, 0.35], [0.35, 0.15]]
+    weights_map = np.array([[color_weights[desc[idx]] for idx in row] for row in pattern])
+
+    # 4. Apply using the Reshape Trick
+    quads = raw_image.reshape(height // 2, 2, width // 2, 2)
+    # For every 2x2 block in the image, multiply it element-wise by the weight map and sum the results into a single pixel.
+    return np.einsum("hiwj,ij->hw", quads, weights_map).astype(np.float32)
 
 
 @njit
@@ -61,28 +71,40 @@ def find_best_offset(
         A tuple of (best_dy, best_dx, minimum_sad).
 
     """
+
     height, width = target_proxy.shape
     min_sad = 1e20  # A large float for Numba compatibility
     best_dy, best_dx = 0, 0
 
-    # Exhaustive search within the max_offset window
     for dy in range(-max_offset, max_offset + 1):
         for dx in range(-max_offset, max_offset + 1):
+            # Calculate the intersection of the Target Tile (Ref + offset) and the Target Image
+            # These must be clipped so we don't index out of bounds
+            r_start = max(row_start, -dy, 0)
+            r_end = min(row_start + tile_size, height - dy, height)
+
+            c_start = max(col_start, -dx, 0)
+            c_end = min(col_start + tile_size, width - dx, width)
+
+            if r_start >= r_end or c_start >= c_end:
+                continue
+
+            # Slicing: The target slice must be offset by `dy` and `dx` because it is the 'shifted' version of the reference
+            ref_view = reference_proxy[r_start:r_end, c_start:c_end]
+            tgt_view = target_proxy[r_start + dy : r_end + dy, c_start + dx : c_end + dx]
+
+            # Width Numba per-pixel calculation is faster
+            # np.sum(np.abs(...)) leads to temporary array allocations
             sad = 0.0
+            rows, cols = ref_view.shape
+            for r in range(rows):
+                for c in range(cols):
+                    # Direct subtraction and absolute value
+                    sad += abs(ref_view[r, c] - tgt_view[r, c])
 
-            for tile_ridx in range(tile_size):
-                ref_row = row_start + tile_ridx
-                tgt_row = ref_row + dy
-                if not (0 <= ref_row < height and 0 <= tgt_row < height):
-                    continue
-
-                for tile_cidx in range(tile_size):
-                    ref_col = col_start + tile_cidx
-                    tgt_col = ref_col + dx
-                    if not (0 <= ref_col < height and 0 <= tgt_col < height):
-                        continue
-
-                    sad += abs(reference_proxy[ref_row, ref_col] - target_proxy[tgt_row, tgt_col])
+            # Normalization: If tiles are partially off-image, a smaller area will naturally have a lower SAD.
+            # We divide by area to find the true best match per pixel.
+            sad = sad / (rows * cols)
 
             if sad < min_sad:
                 min_sad = sad
@@ -161,7 +183,7 @@ def merge_tiles(
 @register_step(ISPStep.ALIGN_AND_MERGE)
 def merge_images(
     burst_images: list[np.ndarray],
-    metadata: list[dict[str, Any]],  # noqa: ARG001
+    metadata: list[dict[str, Any]],
     tile_size: int = 32,
     tile_stride: int = 16,
     max_search_offset: int = 8,
@@ -215,7 +237,7 @@ def merge_images(
     # 2. Generate grayscale proxies for alignment
     # TODO (andrei aksionau): using np.stack and then calling this function in a loop for a large burst will eat up RAM.
     # Since numba is used, this logic might be moved directly into a JIT-compiled kernel to process images on the fly
-    luma_proxies = [downscale_bayer_to_grayscale(img) for img in burst_images]
+    luma_proxies = [get_luma_proxy(img, mtd) for img, mtd in zip(burst_images, metadata)]
     proxy_height, proxy_width = luma_proxies[0].shape
     if image_height // proxy_height != image_width // proxy_width:
         raise RuntimeError("Downsampling scale for luma proxy is uneven for width and height.")
