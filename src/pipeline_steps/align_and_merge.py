@@ -1,6 +1,7 @@
 from typing import Any
 
 import numpy as np
+from loguru import logger
 from numba import njit
 from tqdm import trange
 
@@ -114,6 +115,65 @@ def find_best_offset(
     return best_dy, best_dx, min_sad
 
 
+def get_noise_params_2x2(metadata: list[dict[str, Any]]) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Parses the NoiseProfile from metadata into 2x2 grids aligned with the Bayer pattern.
+
+    The NoiseProfile (typically from DNG/EXIF) provides pairs of (scale, offset) values
+    representing shot noise and read noise respectively. This function maps those
+    values to the specific 2x2 CFA layout of the sensor.
+
+    Args:
+        metadata: A list of metadata dictionaries for the burst. Only the first
+            entry is used for the profile, but all are checked for consistency.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]:
+            - scales_grid: A 2x2 float32 array of shot noise scales.
+            - offsets_grid: A 2x2 float32 array of read noise offsets.
+
+    Raises:
+        ValueError: If the CFAPlaneColor does not match the expected "Red,Green,Blue"
+            sequence or if the NoiseProfile format is invalid.
+
+    """
+
+    if "NoiseProfile" in metadata[0] and not all(
+        metadata[0]["NoiseProfile"] == mtd["NoiseProfile"] for mtd in metadata
+    ):
+        logger.warning(
+            "Images in the burst have different NoiseProfile which means that shots were taken "
+            "with different parameters. Merging multi-exposure frames is not yet supported/tested."
+        )
+    mtd = metadata[0]
+
+    if "CFAPlaneColor" in mtd and mtd["CFAPlaneColor"] != "Red,Green,Blue":
+        raise ValueError(f"The code expects that the matrix layout is Red Green Blue, but got {mtd['CFAPlaneColor']}")
+
+    # NoiseProfile contains 6 values: 3 pairs of Scale and Offset for each color
+    if "NoiseProfile" in mtd:
+        noise_profile = [float(x) for x in mtd["NoiseProfile"].split()]
+    else:
+        logger.warning(f"NoiseProfile missing for {mtd.get('Model', 'Unknown')}. Using generic defaults.")
+        # TODO (andrei aksionau): make it camera and ISO agnostic
+        # Generic defaults for a 10-bit sensor (scaled to [0, 1] range)
+        # These are placeholders; real values for Nexus 6 at ISO 40 are very small.
+        noise_profile = [1e-5, 1e-6, 1e-5, 1e-6, 1e-5, 1e-6]
+
+    color_map = {}
+    for idx, color_name in enumerate(("R", "G", "B")):
+        color_map[color_name] = (noise_profile[idx * 2], noise_profile[idx * 2 + 1])
+
+    desc = mtd["color_desc"]  # e.g., "RGBG"
+    pattern = mtd["raw_pattern"]  # e.g., [[2, 3], [1, 0]]
+
+    # Create 2x2 grids for G and C
+    scales_grid = np.array([[color_map[desc[idx]][0] for idx in row] for row in pattern], dtype=np.float32)
+    offsets_grid = np.array([[color_map[desc[idx]][1] for idx in row] for row in pattern], dtype=np.float32)
+
+    return scales_grid, offsets_grid
+
+
 @njit
 def merge_tiles(
     merged_accumulator: np.ndarray,
@@ -123,8 +183,10 @@ def merge_tiles(
     sad_scores: np.ndarray,
     row_start: int,
     col_start: int,
-    sad_threshold: float,
     tile_size: int,
+    noise_scales: np.ndarray,
+    noise_offsets: np.ndarray,
+    k: float = 4.0,
 ) -> None:
     """
     Performs weighted accumulation of a tile across the burst into the final image.
@@ -141,13 +203,48 @@ def merge_tiles(
         sad_scores: SAD values from the proxy alignment step (N,).
         row_start: Top row index of the tile in full-res coordinates.
         col_start: Left column index of the tile in full-res coordinates.
-        sad_threshold: Threshold above which a frame is considered misaligned.
         tile_size: The width/height of the tile in full-res pixels.
+        noise_scales: 2x2 matrix of shot noises per-channel
+        noise_offsets: 2x2 matrix of matrix read noise per-channel
+        k: higher = more blurring, lower = more ghosting rejection. A value of k=4 to k=12 is usually a good starting point.
 
     """
 
     num_images = len(burst_images)
     height, width = merged_accumulator.shape
+
+    # Statistical correction: Luma proxy averaging reduces variance by ~4x
+    # We must account for this so the SAD (from proxy) matches the Noise Model
+    # Since luma proxy weighs greens more, the actual value is
+    # 0.15**2 + 0.35**2 + 0.35**2 + 0.15**2 = 0.29
+    proxy_variance_scale = 0.29
+
+    def get_sigma_square(row: int, col: int, reference_values: float) -> float:
+        """
+        Helper function to get noise floor for the pixel given per-channel value in NoiseProfile from metadata.
+
+        Given the NoiseProfile from the metadata, the noise model is:
+
+        sigma^2 = g * x + c
+
+        g (Scale): shot noise
+        c (Offset): read noise
+        """  # noqa: DOC201
+
+        # Determine which part of the Bayer 2x2 we are in
+        bayer_row = row % 2
+        bayer_col = col % 2
+
+        # Get the specific noise params for this color channel
+        scale = noise_scales[bayer_row, bayer_col]
+        offset = noise_offsets[bayer_row, bayer_col]
+
+        # Variance for this specific pixel
+        # Because we are comparing a target frame to a reference frame, the variance of the difference is the sum of their variances
+        # Assumes that Var(Reference) ≈ Var(Target)
+        sigma_sq = max(1e-9, 2.0 * (scale * reference_values + offset))
+        # Adjust sigma to match the scale of the SAD score (calculated on proxy)
+        return sigma_sq * proxy_variance_scale
 
     for tile_ridx in range(tile_size):
         for tile_cidx in range(tile_size):
@@ -157,27 +254,29 @@ def merge_tiles(
             if image_ridx >= height or image_cidx >= width:
                 continue
 
-            # Frame 0 is our reference; anchor it with a weight of 1.0
             pixel_sum = burst_images[0][image_ridx, image_cidx]
             weight_sum = 1.0
+            sigma_sq = get_sigma_square(image_ridx, image_cidx, pixel_sum)
 
             for img_idx in range(1, num_images):
-                if sad_scores[img_idx] < sad_threshold:
-                    dy = offsets[img_idx, 0]
-                    dx = offsets[img_idx, 1]
+                dy = offsets[img_idx, 0]
+                dx = offsets[img_idx, 1]
 
-                    # Find the corresponding pixel in the target frame
-                    target_ridx = max(0, min(image_ridx + dy, height - 1))
-                    target_cidx = max(0, min(image_cidx + dx, width - 1))
+                # Find the corresponding pixel in the target frame
+                target_ridx = max(0, min(image_ridx + dy, height - 1))
+                target_cidx = max(0, min(image_cidx + dx, width - 1))
 
-                    # Weight is inversely proportional to alignment error (SAD)
-                    weight = 1.0 / (sad_scores[img_idx] + 1e-8)
-                    pixel_sum += burst_images[img_idx][target_ridx, target_cidx] * weight
-                    weight_sum += weight
+                # Robust Exponential Kernel Weighting
+                # Weighting formula: exp( - (SAD^2) / (k * sigma_sq) )
+                # We square the L1-based SAD to create a sharper rejection "cliff."
+                # This aggressively suppresses misaligned tiles to prevent ghosting, effectively behaving like a robust Gaussian weight.
+                weight = np.exp(-(sad_scores[img_idx] ** 2) / (k * sigma_sq + 1e-8))
 
-            if weight_sum > 0:
-                merged_accumulator[image_ridx, image_cidx] += pixel_sum / weight_sum  # Weighted average
-                weights_accumulator[image_ridx, image_cidx] += 1.0  # Count for normalization
+                pixel_sum += burst_images[img_idx][target_ridx, target_cidx] * weight
+                weight_sum += weight
+
+            merged_accumulator[image_ridx, image_cidx] += pixel_sum
+            weights_accumulator[image_ridx, image_cidx] += weight_sum
 
 
 @register_step(ISPStep.ALIGN_AND_MERGE)
@@ -244,12 +343,14 @@ def merge_images(
 
     # Calculate scaling factor between proxy and full-res space
     size_scaler = image_height // proxy_height
+    if size_scaler % 2 != 0:
+        logger.warning("Luma proxy is scaled by an odd number: merging can cause catastrophic color artifacts.")
 
     # 3. Parameters for block matching
-    sad_threshold = 0.15 * tile_size**2  # SAD threshold for robust merging
     proxy_tile_size = tile_size // size_scaler
     proxy_stride = tile_stride // size_scaler
     proxy_max_offset = max_search_offset // size_scaler
+    noise_scales, noise_offsets = get_noise_params_2x2(metadata)
 
     # 4. Main loop: block-matching and merging
     for proxy_row in trange(0, proxy_height, proxy_stride, desc="Aligning&Merging Burst"):
@@ -282,8 +383,10 @@ def merge_images(
                 sad_scores=sad_scores,
                 row_start=proxy_row * size_scaler,
                 col_start=proxy_col * size_scaler,
-                sad_threshold=sad_threshold,
                 tile_size=tile_size,
+                noise_scales=noise_scales,
+                noise_offsets=noise_offsets,
+                k=4.0,
             )
 
     # 5. Final normalization (weighted average across overlapping tiles)
