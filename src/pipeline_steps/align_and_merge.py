@@ -3,6 +3,7 @@ from typing import Any
 import numpy as np
 from loguru import logger
 from numba import njit
+from scipy import stats
 from tqdm import trange
 
 from base import ISPStep, register_step
@@ -115,7 +116,9 @@ def find_best_offset(
     return best_dy, best_dx, min_sad
 
 
-def get_noise_params_2x2(metadata: list[dict[str, Any]]) -> tuple[np.ndarray, np.ndarray]:
+def get_noise_params_2x2(
+    burst_images: list[np.ndarray], metadata: list[dict[str, Any]]
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Parses the NoiseProfile from metadata into 2x2 grids aligned with the Bayer pattern.
 
@@ -123,7 +126,11 @@ def get_noise_params_2x2(metadata: list[dict[str, Any]]) -> tuple[np.ndarray, np
     representing shot noise and read noise respectively. This function maps those
     values to the specific 2x2 CFA layout of the sensor.
 
+    If NoiseProfile is missing in metadata, it falls back to a Mean-Variance (Photon Transfer Curve)
+    estimation performed on the reference frame.
+
     Args:
+        burst_images: A list of RAW images (2D numpy arrays).
         metadata: A list of metadata dictionaries for the burst. Only the first
             entry is used for the profile, but all are checked for consistency.
 
@@ -145,31 +152,103 @@ def get_noise_params_2x2(metadata: list[dict[str, Any]]) -> tuple[np.ndarray, np
             "Images in the burst have different NoiseProfile which means that shots were taken "
             "with different parameters. Merging multi-exposure frames is not yet supported/tested."
         )
+    ref_image = burst_images[0]
     mtd = metadata[0]
 
     if "CFAPlaneColor" in mtd and mtd["CFAPlaneColor"] != "Red,Green,Blue":
         raise ValueError(f"The code expects that the matrix layout is Red Green Blue, but got {mtd['CFAPlaneColor']}")
 
-    # NoiseProfile contains 6 values: 3 pairs of Scale and Offset for each color
+    # Case A: Use DNG-standard NoiseProfile if available
     if "NoiseProfile" in mtd:
         noise_profile = [float(x) for x in mtd["NoiseProfile"].split()]
-    else:
-        logger.warning(f"NoiseProfile missing for {mtd.get('Model', 'Unknown')}. Using generic defaults.")
-        # TODO (andrei aksionau): make it camera and ISO agnostic
-        # Generic defaults for a 10-bit sensor (scaled to [0, 1] range)
-        # These are placeholders; real values for Nexus 6 at ISO 40 are very small.
-        noise_profile = [1e-5, 1e-6, 1e-5, 1e-6, 1e-5, 1e-6]
+        color_map = {}
+        # NoiseProfile contains 6 values: 3 pairs of Scale and Offset for each color
+        for idx, color_name in enumerate(("R", "G", "B")):
+            color_map[color_name] = (noise_profile[idx * 2], noise_profile[idx * 2 + 1])
 
-    color_map = {}
-    for idx, color_name in enumerate(("R", "G", "B")):
-        color_map[color_name] = (noise_profile[idx * 2], noise_profile[idx * 2 + 1])
+        desc = mtd["color_desc"]  # e.g., "RGBG"
+        pattern = mtd["raw_pattern"]  # e.g., [[2, 3], [1, 0]]
 
-    desc = mtd["color_desc"]  # e.g., "RGBG"
-    pattern = mtd["raw_pattern"]  # e.g., [[2, 3], [1, 0]]
+        # Create 2x2 grids for G and C
+        scales_grid = np.array([[color_map[desc[idx]][0] for idx in row] for row in pattern], dtype=np.float32)
+        offsets_grid = np.array([[color_map[desc[idx]][1] for idx in row] for row in pattern], dtype=np.float32)
 
-    # Create 2x2 grids for G and C
-    scales_grid = np.array([[color_map[desc[idx]][0] for idx in row] for row in pattern], dtype=np.float32)
-    offsets_grid = np.array([[color_map[desc[idx]][1] for idx in row] for row in pattern], dtype=np.float32)
+        return scales_grid, offsets_grid
+
+    # Case B: Fallback to empirical estimation
+    logger.warning("NoiseProfile missing for %s. Estimating noise from reference frame.", mtd.get("Model", "Unknown"))
+    return estimate_burst_noise_profile(ref_image)
+
+
+def estimate_burst_noise_profile(image: np.ndarray, patch_size: int = 8) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Estimates shot and read noise parameters using Mean-Variance analysis.
+
+    The function implements a Photon Transfer Curve (PTC) approach:
+    1. Sub-samples the image into 4 Bayer phases (R, Gr, Gb, B).
+    2. Tiles each phase into small patches and calculates local mean and variance.
+    3. Filters for 'flat' patches across brightness levels to isolate noise from texture.
+    4. Performs linear regression: Variance = g * Mean + c.
+
+    Args:
+        image: The reference RAW image (normalized [0, 1], black-level subtracted, LSC applied).
+        patch_size: Size of tiles used for local statistics (applied to sub-sampled channels).
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: 2x2 grids of (slope/shot) and (intercept/read) noise.
+
+    """
+
+    # By cropping to the center, we ensure the linear regression isn't trying to fit a "tilted"
+    # plane where the read noise is amplified by different LSC gain factors at the edges.
+    ch, cw = [x // 4 for x in image.shape]
+    center_crop = image[ch:-ch, cw:-cw]
+
+    scales_grid = np.zeros((2, 2), dtype=np.float32)
+    offsets_grid = np.zeros((2, 2), dtype=np.float32)
+
+    # Analyze each of the 4 CFA positions independently
+    for idx in range(4):
+        row_offset, col_offset = divmod(idx, 2)
+        plane = center_crop[row_offset::2, col_offset::2]
+
+        plane_height, plane_width = plane.shape
+        h_tiles, w_tiles = plane_height // patch_size, plane_width // patch_size
+        # Tile the channel into patches for statistical sampling
+        patches = plane[: h_tiles * patch_size, : w_tiles * patch_size].reshape(
+            h_tiles, patch_size, w_tiles, patch_size
+        )
+
+        means = np.mean(patches, axis=(1, 3)).flatten()
+        vars = np.var(patches, axis=(1, 3)).flatten()
+
+        # Isolate noise by binning variances by brightness and selecting
+        # the lowest 10% (the 'flattest' patches) in each bin.
+        filtered_means = []
+        filtered_vars = []
+
+        # Ignore extreme blacks/highlights to avoid clipping bias
+        bins = np.linspace(np.quantile(means, 0.05), np.quantile(means, 0.95), 15)
+        for bin_idx in range(len(bins) - 1):
+            idx = (means >= bins[bin_idx]) & (means < bins[bin_idx + 1])
+            if np.count_nonzero(idx) > 5:
+                bin_vars = vars[idx]
+                thresh = np.percentile(bin_vars, 10)
+                filtered_means.extend(means[idx][bin_vars <= thresh])
+                filtered_vars.extend(bin_vars[bin_vars <= thresh])
+
+        if len(filtered_means) < 10:
+            # Default values for a typical clean sensor if estimation fails
+            scales_grid[row_offset, col_offset] = 1e-4
+            offsets_grid[row_offset, col_offset] = 1e-6
+            continue
+
+        # Linear regression yields the noise model: sigma^2 = slope * signal + intercept
+        slope, intercept, _, _, _ = stats.linregress(filtered_means, filtered_vars)
+
+        # Clip to ensure physical validity (noise parameters must be positive)
+        scales_grid[row_offset, col_offset] = max(slope, 1e-7)
+        offsets_grid[row_offset, col_offset] = max(intercept, 1e-9)
 
     return scales_grid, offsets_grid
 
@@ -298,7 +377,7 @@ def merge_images(
     while the final merge occurs at the original RAW resolution.
 
     Args:
-        burst_images: A list 2D numpy arrays.
+        burst_images: A list of RAW images (2D numpy arrays).
         metadata: A list of dictionaries containing per-frame sensor metadata (e.g.,
             exposure time, black level).
         tile_size: The width/height of the processing tile in full-resolution pixels.
@@ -350,7 +429,7 @@ def merge_images(
     proxy_tile_size = tile_size // size_scaler
     proxy_stride = tile_stride // size_scaler
     proxy_max_offset = max_search_offset // size_scaler
-    noise_scales, noise_offsets = get_noise_params_2x2(metadata)
+    noise_scales, noise_offsets = get_noise_params_2x2(burst_images, metadata)
 
     # 4. Main loop: block-matching and merging
     for proxy_row in trange(0, proxy_height, proxy_stride, desc="Aligning&Merging Burst"):
