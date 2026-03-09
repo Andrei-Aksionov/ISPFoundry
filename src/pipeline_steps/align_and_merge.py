@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from loguru import logger
@@ -105,7 +105,7 @@ def find_best_offset(
                     sad += abs(ref_view[r, c] - tgt_view[r, c])
 
             # Normalization: If tiles are partially off-image, a smaller area will naturally have a lower SAD.
-            # We divide by area to find the true best match per pixel.
+            # Divide by area to find the true best match per pixel.
             sad = sad / (rows * cols)
 
             if sad < min_sad:
@@ -177,10 +177,10 @@ def get_noise_params_2x2(
 
     # Case B: Fallback to empirical estimation
     logger.warning("NoiseProfile missing for %s. Estimating noise from reference frame.", mtd.get("Model", "Unknown"))
-    return estimate_burst_noise_profile(ref_image)
+    return estimate_noise_profile(ref_image)
 
 
-def estimate_burst_noise_profile(image: np.ndarray, patch_size: int = 8) -> tuple[np.ndarray, np.ndarray]:
+def estimate_noise_profile(image: np.ndarray, patch_size: int = 8) -> tuple[np.ndarray, np.ndarray]:
     """
     Estimates shot and read noise parameters using Mean-Variance analysis.
 
@@ -265,7 +265,8 @@ def merge_tiles(
     tile_size: int,
     noise_scales: np.ndarray,
     noise_offsets: np.ndarray,
-    k: float = 4.0,
+    k: float,
+    weight_kernel: Literal["L1", "L2"] = "L1",
 ) -> None:
     """
     Performs weighted accumulation of a tile across the burst into the final image.
@@ -285,7 +286,12 @@ def merge_tiles(
         tile_size: The width/height of the tile in full-res pixels.
         noise_scales: 2x2 matrix of shot noises per-channel
         noise_offsets: 2x2 matrix of matrix read noise per-channel
-        k: higher = more blurring, lower = more ghosting rejection. A value of k=4 to k=12 is usually a good starting point.
+        k:
+           - High k (4.0 - 12.0): Promotes temporal averaging (ideal for high-ISO denoising).
+           - Low k (0.5 - 1.0): Promotes frame rejection (ideal for sharp motion/ghosting).
+        weight_kernel:
+           - L1 (Laplacian weighting): Best for static, noisy backgrounds.
+           - L2 (Gaussian weighting): Best for aggressive ghosting rejection.
 
     """
 
@@ -293,7 +299,7 @@ def merge_tiles(
     height, width = merged_accumulator.shape
 
     # Statistical correction: Luma proxy averaging reduces variance by ~4x
-    # We must account for this so the SAD (from proxy) matches the Noise Model
+    # Must account for this so the SAD (from proxy) matches the Noise Model
     # Since luma proxy weighs greens more, the actual value is
     # 0.15**2 + 0.35**2 + 0.35**2 + 0.15**2 = 0.29
     proxy_variance_scale = 0.29
@@ -346,10 +352,13 @@ def merge_tiles(
                 target_cidx = max(0, min(image_cidx + dx, width - 1))
 
                 # Robust Exponential Kernel Weighting
-                # Weighting formula: exp( - (SAD^2) / (k * sigma_sq) )
-                # We square the L1-based SAD to create a sharper rejection "cliff."
-                # This aggressively suppresses misaligned tiles to prevent ghosting, effectively behaving like a robust Gaussian weight.
-                weight = np.exp(-(sad_scores[img_idx] ** 2) / (k * sigma_sq + 1e-8))
+                if weight_kernel == "L1":
+                    # # This has a 'heavy tail' compared to SAD^2, which is why it merges static backgrounds better at high ISO.
+                    weight = np.exp(-(sad_scores[img_idx]) / (k * np.sqrt(sigma_sq) + 1e-8))
+                else:
+                    # Square the L1-based SAD to create a sharper rejection "cliff."
+                    # This aggressively suppresses misaligned tiles to prevent ghosting, effectively behaving like a robust Gaussian weight.
+                    weight = np.exp(-(sad_scores[img_idx] ** 2) / (k * sigma_sq + 1e-8))
 
                 pixel_sum += burst_images[img_idx][target_ridx, target_cidx] * weight
                 weight_sum += weight
@@ -365,8 +374,6 @@ def merge_images(
     tile_size: int = 32,
     tile_stride: int = 16,
     max_search_offset: int = 8,
-    *args: Any,  # noqa: ARG001
-    **kwargs: Any,  # noqa: ARG001
 ) -> np.ndarray:
     """
     Performs block-based alignment and temporal merging of a RAW image burst.
@@ -386,8 +393,6 @@ def merge_images(
             strides increase overlap and reduce tiling artifacts but increase compute time.
         max_search_offset: The maximum distance (in full-res pixels) the algorithm
             will search for a matching block in any direction.
-        *args: Additional positional arguments for ISP pipeline compatibility.
-        **kwargs: Additional keyword arguments.
 
     Returns:
         np.ndarray: The merged RAW image of shape (H, W), normalized by tile weights.
@@ -429,9 +434,18 @@ def merge_images(
     proxy_tile_size = tile_size // size_scaler
     proxy_stride = tile_stride // size_scaler
     proxy_max_offset = max_search_offset // size_scaler
+
+    # 4. Noise Estimation & Adaptive K Calculation
     noise_scales, noise_offsets = get_noise_params_2x2(burst_images, metadata)
 
-    # 4. Main loop: block-matching and merging
+    # Calculates k using a logarithmic ISO scale. Doubling ISO (1 stop) increases k linearly.
+    current_iso = metadata[0].get("ISO")
+    if not current_iso:
+        raise RuntimeError("ISO is not provided in the metadata.")
+    stops = np.log2(current_iso / 100.0)
+    k_adaptive = np.power(2.0, stops)
+
+    # 5. Main loop: block-matching and merging
     for proxy_row in trange(0, proxy_height, proxy_stride, desc="Aligning&Merging Burst"):
         for proxy_col in range(0, proxy_width, proxy_stride):
             offsets_proxy = np.zeros((num_images, 2), dtype=np.int32)
@@ -465,7 +479,7 @@ def merge_images(
                 tile_size=tile_size,
                 noise_scales=noise_scales,
                 noise_offsets=noise_offsets,
-                k=4.0,
+                k=k_adaptive,
             )
 
     # 5. Final normalization (weighted average across overlapping tiles)
