@@ -177,10 +177,10 @@ def get_noise_params_2x2(
 
     # Case B: Fallback to empirical estimation
     logger.warning("NoiseProfile missing for %s. Estimating noise from reference frame.", mtd.get("Model", "Unknown"))
-    return estimate_burst_noise_profile(ref_image)
+    return estimate_noise_profile(ref_image)
 
 
-def estimate_burst_noise_profile(image: np.ndarray, patch_size: int = 8) -> tuple[np.ndarray, np.ndarray]:
+def estimate_noise_profile(image: np.ndarray, patch_size: int = 8) -> tuple[np.ndarray, np.ndarray]:
     """
     Estimates shot and read noise parameters using Mean-Variance analysis.
 
