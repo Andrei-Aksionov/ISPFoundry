@@ -365,8 +365,6 @@ def merge_images(
     tile_size: int = 32,
     tile_stride: int = 16,
     max_search_offset: int = 8,
-    *args: Any,  # noqa: ARG001
-    **kwargs: Any,  # noqa: ARG001
 ) -> np.ndarray:
     """
     Performs block-based alignment and temporal merging of a RAW image burst.
@@ -386,8 +384,6 @@ def merge_images(
             strides increase overlap and reduce tiling artifacts but increase compute time.
         max_search_offset: The maximum distance (in full-res pixels) the algorithm
             will search for a matching block in any direction.
-        *args: Additional positional arguments for ISP pipeline compatibility.
-        **kwargs: Additional keyword arguments.
 
     Returns:
         np.ndarray: The merged RAW image of shape (H, W), normalized by tile weights.
