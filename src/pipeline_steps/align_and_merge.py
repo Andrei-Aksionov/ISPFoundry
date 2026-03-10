@@ -49,7 +49,7 @@ def get_luma_proxy(raw_image: np.ndarray, metadata: dict[str, Any]) -> np.ndarra
     return np.einsum("hiwj,ij->hw", quads, weights_map).astype(np.float32)
 
 
-@njit
+@njit(fastmath=True)
 def find_best_offset(
     reference_proxy: np.ndarray,
     target_proxy: np.ndarray,
@@ -57,9 +57,14 @@ def find_best_offset(
     col_start: int,
     tile_size: int,
     max_offset: int,
+    noise_scales: np.ndarray,
+    noise_offsets: np.ndarray,
 ) -> tuple[int, int, float]:
     """
-    Finds the integer translation (dy, dx) that minimizes the SAD between tiles.
+    Finds the integer translation (dy, dx) using Variance-Weighted SAD (VW-SAD).
+
+    The score is normalized by the noise floor (sigma) of the tile, meaning a score of 1.0 indicates
+    that the average pixel difference matches the expected noise level.
 
     Args:
         reference_proxy: The reference grayscale image (usually the first frame).
@@ -68,14 +73,36 @@ def find_best_offset(
         col_start: Left column index of the tile in the proxy coordinate system.
         tile_size: The width/height of the tile in proxy pixels.
         max_offset: The maximum pixels to search in any direction.
+        noise_scales: 2x2 matrix of shot noises per-channel
+        noise_offsets: 2x2 matrix of matrix read noise per-channel
 
     Returns:
         A tuple of (best_dy, best_dx, minimum_sad).
 
     """
 
-    height, width = target_proxy.shape
-    min_sad = 1e20  # A large float for Numba compatibility
+    # 1. Calculate the noise floor for this tile
+    ref_tile = reference_proxy[row_start : row_start + tile_size, col_start : col_start + tile_size]
+    tile_mean = np.mean(ref_tile)
+
+    # Average noise parameters for the luma proxy
+    avg_scale = np.mean(noise_scales)
+    avg_offset = np.mean(noise_offsets)
+
+    # Statistical correction: Luma proxy averaging reduces variance by ~4x
+    # Must account for this so the SAD (from proxy) matches the Noise Model
+    # Since luma proxy weighs greens more, the actual value is
+    # 0.15**2 + 0.35**2 + 0.35**2 + 0.15**2 = 0.29
+    proxy_variance_scale = 0.29
+
+    # Variance of the difference: Var(Ref - Tgt) = Var(Ref) + Var(Tgt) ≈ 2 * Var(Ref)
+    # Assumes that Var(Reference) ≈ Var(Target)
+    # Given the NoiseProfile from the metadata, the noise model is: sigma^2 = g * x + c
+    sigma_sq = max(1e-9, 2.0 * (avg_scale * tile_mean + avg_offset)) * proxy_variance_scale
+    inv_sigma = 1.0 / (np.sqrt(sigma_sq) + 1e-8)
+
+    height, width = reference_proxy.shape
+    min_sad = 1e20
     best_dy, best_dx = 0, 0
 
     for dy in range(-max_offset, max_offset + 1):
@@ -106,10 +133,11 @@ def find_best_offset(
 
             # Normalization: If tiles are partially off-image, a smaller area will naturally have a lower SAD.
             # Divide by area to find the true best match per pixel.
-            sad = sad / (rows * cols)
+            # sad = sad / (rows * cols)
+            normalized_sad = (sad * inv_sigma) / (tile_size * tile_size)
 
-            if sad < min_sad:
-                min_sad = sad
+            if normalized_sad < min_sad:
+                min_sad = normalized_sad
                 best_dy = dy
                 best_dx = dx
 
@@ -263,8 +291,6 @@ def merge_tiles(
     row_start: int,
     col_start: int,
     tile_size: int,
-    noise_scales: np.ndarray,
-    noise_offsets: np.ndarray,
     k: float,
     weight_kernel: Literal["L1", "L2"] = "L1",
 ) -> None:
@@ -284,8 +310,6 @@ def merge_tiles(
         row_start: Top row index of the tile in full-res coordinates.
         col_start: Left column index of the tile in full-res coordinates.
         tile_size: The width/height of the tile in full-res pixels.
-        noise_scales: 2x2 matrix of shot noises per-channel
-        noise_offsets: 2x2 matrix of matrix read noise per-channel
         k:
            - High k (4.0 - 12.0): Promotes temporal averaging (ideal for high-ISO denoising).
            - Low k (0.5 - 1.0): Promotes frame rejection (ideal for sharp motion/ghosting).
@@ -298,67 +322,46 @@ def merge_tiles(
     num_images = len(burst_images)
     height, width = merged_accumulator.shape
 
-    # Statistical correction: Luma proxy averaging reduces variance by ~4x
-    # Must account for this so the SAD (from proxy) matches the Noise Model
-    # Since luma proxy weighs greens more, the actual value is
-    # 0.15**2 + 0.35**2 + 0.35**2 + 0.15**2 = 0.29
-    proxy_variance_scale = 0.29
+    # 1. Pre-calculate weights for all images in the burst for THIS tile.
+    weights = np.zeros(num_images, dtype=np.float32)
+    weights[0] = 1.0  # Reference frame always has full weight
 
-    def get_sigma_square(row: int, col: int, reference_values: float) -> float:
-        """
-        Helper function to get noise floor for the pixel given per-channel value in NoiseProfile from metadata.
+    # Robust Exponential Kernel Weighting
+    for img_idx in range(1, num_images):
+        if weight_kernel == "L1":
+            # Laplacian weighting: better for noise, worse for motion
+            # ( sad_scores is already (SAD / sigma) )
+            weights[img_idx] = np.exp(-sad_scores[img_idx] / k)
+        else:
+            # Gaussian weighting: aggressive rejection of motion/ghosting
+            # Using k**2 keeps 'k' sensitivity linear across both kernels
+            weights[img_idx] = np.exp(-(sad_scores[img_idx] ** 2) / (k**2))
 
-        Given the NoiseProfile from the metadata, the noise model is:
-
-        sigma^2 = g * x + c
-
-        g (Scale): shot noise
-        c (Offset): read noise
-        """  # noqa: DOC201
-
-        # Determine which part of the Bayer 2x2 we are in
-        bayer_row = row % 2
-        bayer_col = col % 2
-
-        # Get the specific noise params for this color channel
-        scale = noise_scales[bayer_row, bayer_col]
-        offset = noise_offsets[bayer_row, bayer_col]
-
-        # Variance for this specific pixel
-        # Because we are comparing a target frame to a reference frame, the variance of the difference is the sum of their variances
-        # Assumes that Var(Reference) ≈ Var(Target)
-        sigma_sq = max(1e-9, 2.0 * (scale * reference_values + offset))
-        # Adjust sigma to match the scale of the SAD score (calculated on proxy)
-        return sigma_sq * proxy_variance_scale
-
+    # 2. Pixel Accumulation Loop
     for tile_ridx in range(tile_size):
+        image_ridx = row_start + tile_ridx
+        if image_ridx >= height:
+            break
+
         for tile_cidx in range(tile_size):
-            image_ridx = row_start + tile_ridx
             image_cidx = col_start + tile_cidx
+            if image_cidx >= width:
+                break
 
-            if image_ridx >= height or image_cidx >= width:
-                continue
+            pixel_sum = weight_sum = 0.0
 
-            pixel_sum = burst_images[0][image_ridx, image_cidx]
-            weight_sum = 1.0
-            sigma_sq = get_sigma_square(image_ridx, image_cidx, pixel_sum)
+            for img_idx in range(num_images):
+                weight = weights[img_idx]
+                # If weight is negligible, skip the memory fetch
+                if weight < 1e-4:
+                    continue
 
-            for img_idx in range(1, num_images):
                 dy = offsets[img_idx, 0]
                 dx = offsets[img_idx, 1]
 
-                # Find the corresponding pixel in the target frame
+                # Boundary-safe pixel fetch
                 target_ridx = max(0, min(image_ridx + dy, height - 1))
                 target_cidx = max(0, min(image_cidx + dx, width - 1))
-
-                # Robust Exponential Kernel Weighting
-                if weight_kernel == "L1":
-                    # # This has a 'heavy tail' compared to SAD^2, which is why it merges static backgrounds better at high ISO.
-                    weight = np.exp(-(sad_scores[img_idx]) / (k * np.sqrt(sigma_sq) + 1e-8))
-                else:
-                    # Square the L1-based SAD to create a sharper rejection "cliff."
-                    # This aggressively suppresses misaligned tiles to prevent ghosting, effectively behaving like a robust Gaussian weight.
-                    weight = np.exp(-(sad_scores[img_idx] ** 2) / (k * sigma_sq + 1e-8))
 
                 pixel_sum += burst_images[img_idx][target_ridx, target_cidx] * weight
                 weight_sum += weight
@@ -443,13 +446,14 @@ def merge_images(
     if not current_iso:
         raise RuntimeError("ISO is not provided in the metadata.")
     stops = np.log2(current_iso / 100.0)
-    k_adaptive = np.power(2.0, stops)
+    # VW-SAD scores are in "sigma units", k = 1.0 means we trust differences up to 1 standard deviation.
+    k_adaptive = 1.0 + (0.5 * stops)
 
     # 5. Main loop: block-matching and merging
     for proxy_row in trange(0, proxy_height, proxy_stride, desc="Aligning&Merging Burst"):
         for proxy_col in range(0, proxy_width, proxy_stride):
             offsets_proxy = np.zeros((num_images, 2), dtype=np.int32)
-            sad_scores = np.zeros(num_images, dtype=np.float32)
+            vw_sad_scores = np.zeros(num_images, dtype=np.float32)
 
             # Align target frames to the reference proxy
             for img_idx in range(1, num_images):
@@ -460,9 +464,12 @@ def merge_images(
                     col_start=proxy_col,
                     tile_size=proxy_tile_size,
                     max_offset=proxy_max_offset,
+                    noise_scales=noise_scales,
+                    noise_offsets=noise_offsets,
                 )
+
                 offsets_proxy[img_idx] = (dy, dx)
-                sad_scores[img_idx] = score
+                vw_sad_scores[img_idx] = score
 
             # Scale alignment results back to the original RAW resolution
             offsets_full_res = offsets_proxy * size_scaler
@@ -473,12 +480,10 @@ def merge_images(
                 weights_accumulator=weights_accumulator,
                 burst_images=burst_images,
                 offsets=offsets_full_res,
-                sad_scores=sad_scores,
+                sad_scores=vw_sad_scores,
                 row_start=proxy_row * size_scaler,
                 col_start=proxy_col * size_scaler,
                 tile_size=tile_size,
-                noise_scales=noise_scales,
-                noise_offsets=noise_offsets,
                 k=k_adaptive,
             )
 
