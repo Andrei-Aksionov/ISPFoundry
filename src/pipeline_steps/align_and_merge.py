@@ -1,4 +1,4 @@
-from typing import Any, Literal
+from typing import Any
 
 import numpy as np
 from loguru import logger
@@ -281,93 +281,67 @@ def find_best_offset(
     return best_dy, best_dx, min_sad
 
 
-@njit
-def merge_tiles(
+@njit(fastmath=True)
+def merge_tile(
     merged_accumulator: np.ndarray,
     weights_accumulator: np.ndarray,
-    burst_images: list[np.ndarray],
-    offsets: np.ndarray,
-    sad_scores: np.ndarray,
+    target_image: np.ndarray,
     row_start: int,
     col_start: int,
+    row_offset: int,
+    col_offset: int,
+    sad_score: float,
     tile_size: int,
     k: float,
-    weight_kernel: Literal["L1", "L2"] = "L1",
+    use_l2_kernel: bool = False,
 ) -> None:
     """
-    Performs weighted accumulation of a tile across the burst into the final image.
+    Performs weighted merging of a tile from target image into the final image.
 
-    Frames with lower SAD scores (better alignment) are given higher weights.
-    Frames exceeding the sad_threshold are ignored for that specific tile to
-    prevent ghosting artifacts.
+    Tiles with lower SAD scores (better alignment) are given higher weights.
 
     Args:
-        merged_accumulator: The full-res buffer accumulating weighted pixel values.
-        weights_accumulator: The full-res buffer accumulating weights for normalization.
-        burst_images: The original stack of RAW images (N, H, W).
-        offsets: Integer offsets scaled to full resolution (N, 2).
-        sad_scores: SAD values from the proxy alignment step (N,).
+        merged_accumulator: The full-res buffer accumulating weighted pixel values (H, W).
+        weights_accumulator: The full-res buffer accumulating weights for normalization (H, W).
+        target_image: The image to be merged to the reference one (H, W).
         row_start: Top row index of the tile in full-res coordinates.
         col_start: Left column index of the tile in full-res coordinates.
+        row_offset: Offset in row/y/height direction for the target image's tile.
+        col_offset: Offset in col/x/width direction for the target image's tile.
+        sad_score: SAD value from the proxy alignment step.
         tile_size: The width/height of the tile in full-res pixels.
         k:
            - High k (4.0 - 12.0): Promotes temporal averaging (ideal for high-ISO denoising).
            - Low k (0.5 - 1.0): Promotes frame rejection (ideal for sharp motion/ghosting).
-        weight_kernel:
+        use_l2_kernel: if False - L1 kernel is used
            - L1 (Laplacian weighting): Best for static, noisy backgrounds.
            - L2 (Gaussian weighting): Best for aggressive ghosting rejection.
 
     """
 
-    num_images = len(burst_images)
     height, width = merged_accumulator.shape
 
-    # 1. Pre-calculate weights for all images in the burst for THIS tile.
-    weights = np.zeros(num_images, dtype=np.float32)
-    weights[0] = 1.0  # Reference frame always has full weight
+    # Calculate weight: L1 (Laplacian) or L2 (Gaussian)
+    weight = np.exp(-(sad_score**2) / k**2) if use_l2_kernel else np.exp(-sad_score / k)
+    if weight < 1e-4:
+        return
 
-    # Robust Exponential Kernel Weighting
-    for img_idx in range(1, num_images):
-        if weight_kernel == "L1":
-            # Laplacian weighting: better for noise, worse for motion
-            # ( sad_scores is already (SAD / sigma) )
-            weights[img_idx] = np.exp(-sad_scores[img_idx] / k)
-        else:
-            # Gaussian weighting: aggressive rejection of motion/ghosting
-            # Using k**2 keeps 'k' sensitivity linear across both kernels
-            weights[img_idx] = np.exp(-(sad_scores[img_idx] ** 2) / (k**2))
+    # Boundary-safe ref and target tiles intersection
+    r_start = max(row_start, -row_offset, 0)
+    r_end = min(row_start + tile_size, height - row_offset, height)
+    c_start = max(col_start, -col_offset, 0)
+    c_end = min(col_start + tile_size, width - col_offset, width)
 
-    # 2. Pixel Accumulation Loop
-    for tile_ridx in range(tile_size):
-        image_ridx = row_start + tile_ridx
-        if image_ridx >= height:
-            break
+    if r_start >= r_end or c_start >= c_end:
+        return
 
-        for tile_cidx in range(tile_size):
-            image_cidx = col_start + tile_cidx
-            if image_cidx >= width:
-                break
-
-            pixel_sum = weight_sum = 0.0
-
-            for img_idx in range(num_images):
-                weight = weights[img_idx]
-                # If weight is negligible, skip the memory fetch
-                if weight < 1e-4:
-                    continue
-
-                dy = offsets[img_idx, 0]
-                dx = offsets[img_idx, 1]
-
-                # Boundary-safe pixel fetch
-                target_ridx = max(0, min(image_ridx + dy, height - 1))
-                target_cidx = max(0, min(image_cidx + dx, width - 1))
-
-                pixel_sum += burst_images[img_idx][target_ridx, target_cidx] * weight
-                weight_sum += weight
-
-            merged_accumulator[image_ridx, image_cidx] += pixel_sum
-            weights_accumulator[image_ridx, image_cidx] += weight_sum
+    # In-place accumulation (ideal for Numba)
+    for r in range(r_start, r_end):
+        for c in range(c_start, c_end):
+            # Target pixel is at (r + dy, c + dx)
+            val = target_image[r + row_offset, c + col_offset]
+            merged_accumulator[r, c] += val * weight
+            weights_accumulator[r, c] += weight
 
 
 @register_step(ISPStep.ALIGN_AND_MERGE)
@@ -417,14 +391,12 @@ def merge_images(
     image_height, image_width = burst_images[0].shape
 
     # 1. Initialize accumulation buffers
-    merged_accumulator = np.zeros((image_height, image_width), dtype=np.float32)
-    weights_accumulator = np.zeros((image_height, image_width), dtype=np.float32)
+    merged_accumulator = burst_images[0].astype(np.float32, copy=True)
+    weights_accumulator = np.ones((image_height, image_width), dtype=np.float32)
 
-    # 2. Generate grayscale proxies for alignment
-    # TODO (andrei aksionau): using np.stack and then calling this function in a loop for a large burst will eat up RAM.
-    # Since numba is used, this logic might be moved directly into a JIT-compiled kernel to process images on the fly
-    luma_proxies = [get_luma_proxy(img, mtd) for img, mtd in zip(burst_images, metadata)]
-    proxy_height, proxy_width = luma_proxies[0].shape
+    # 2. Generate reference grayscale proxy for alignment
+    reference_luma_proxy = get_luma_proxy(burst_images[0], metadata[0])
+    proxy_height, proxy_width = reference_luma_proxy.shape
     if image_height // proxy_height != image_width // proxy_width:
         raise RuntimeError("Downsampling scale for luma proxy is uneven for width and height.")
 
@@ -450,16 +422,20 @@ def merge_images(
     k_adaptive = 1.0 + (0.5 * stops)
 
     # 5. Main loop: block-matching and merging
-    for proxy_row in trange(0, proxy_height, proxy_stride, desc="Aligning&Merging Burst"):
-        for proxy_col in range(0, proxy_width, proxy_stride):
-            offsets_proxy = np.zeros((num_images, 2), dtype=np.int32)
-            vw_sad_scores = np.zeros(num_images, dtype=np.float32)
 
-            # Align target frames to the reference proxy
-            for img_idx in range(1, num_images):
-                dy, dx, score = find_best_offset(
-                    reference_proxy=luma_proxies[0],
-                    target_proxy=luma_proxies[img_idx],
+    # Pre-calculate tile start positions to ensure we hit the bottom/right edges
+    proxy_rows = list(range(0, proxy_height - proxy_tile_size, proxy_stride))
+    proxy_rows.append(proxy_height - proxy_tile_size)  # Edge coverage
+    proxy_cols = list(range(0, proxy_width - proxy_tile_size, proxy_stride))
+    proxy_cols.append(proxy_width - proxy_tile_size)  # Edge coverage
+
+    for img_idx in trange(1, num_images, desc="Align&Merge (Images)", leave=True, position=0):
+        target_luma_proxy = get_luma_proxy(burst_images[img_idx], metadata[img_idx])
+        for proxy_row in proxy_rows:
+            for proxy_col in proxy_cols:
+                row_offset, col_offset, score = find_best_offset(
+                    reference_proxy=reference_luma_proxy,
+                    target_proxy=target_luma_proxy,
                     row_start=proxy_row,
                     col_start=proxy_col,
                     tile_size=proxy_tile_size,
@@ -468,24 +444,19 @@ def merge_images(
                     noise_offsets=noise_offsets,
                 )
 
-                offsets_proxy[img_idx] = (dy, dx)
-                vw_sad_scores[img_idx] = score
-
-            # Scale alignment results back to the original RAW resolution
-            offsets_full_res = offsets_proxy * size_scaler
-
-            # Merge the tiles into the full-resolution accumulator
-            merge_tiles(
-                merged_accumulator=merged_accumulator,
-                weights_accumulator=weights_accumulator,
-                burst_images=burst_images,
-                offsets=offsets_full_res,
-                sad_scores=vw_sad_scores,
-                row_start=proxy_row * size_scaler,
-                col_start=proxy_col * size_scaler,
-                tile_size=tile_size,
-                k=k_adaptive,
-            )
+                # Merging is done on full-res image, thus size_scaler is used
+                merge_tile(
+                    merged_accumulator=merged_accumulator,
+                    weights_accumulator=weights_accumulator,
+                    target_image=burst_images[img_idx],
+                    row_offset=row_offset * size_scaler,
+                    col_offset=col_offset * size_scaler,
+                    sad_score=score,
+                    row_start=proxy_row * size_scaler,
+                    col_start=proxy_col * size_scaler,
+                    tile_size=tile_size,
+                    k=k_adaptive,
+                )
 
     # 5. Final normalization (weighted average across overlapping tiles)
     mask = weights_accumulator > 0
