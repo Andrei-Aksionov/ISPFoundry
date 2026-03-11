@@ -49,101 +49,6 @@ def get_luma_proxy(raw_image: np.ndarray, metadata: dict[str, Any]) -> np.ndarra
     return np.einsum("hiwj,ij->hw", quads, weights_map).astype(np.float32)
 
 
-@njit(fastmath=True)
-def find_best_offset(
-    reference_proxy: np.ndarray,
-    target_proxy: np.ndarray,
-    row_start: int,
-    col_start: int,
-    tile_size: int,
-    max_offset: int,
-    noise_scales: np.ndarray,
-    noise_offsets: np.ndarray,
-) -> tuple[int, int, float]:
-    """
-    Finds the integer translation (dy, dx) using Variance-Weighted SAD (VW-SAD).
-
-    The score is normalized by the noise floor (sigma) of the tile, meaning a score of 1.0 indicates
-    that the average pixel difference matches the expected noise level.
-
-    Args:
-        reference_proxy: The reference grayscale image (usually the first frame).
-        target_proxy: The target grayscale image to be aligned.
-        row_start: Top row index of the tile in the proxy coordinate system.
-        col_start: Left column index of the tile in the proxy coordinate system.
-        tile_size: The width/height of the tile in proxy pixels.
-        max_offset: The maximum pixels to search in any direction.
-        noise_scales: 2x2 matrix of shot noises per-channel
-        noise_offsets: 2x2 matrix of matrix read noise per-channel
-
-    Returns:
-        A tuple of (best_dy, best_dx, minimum_sad).
-
-    """
-
-    # 1. Calculate the noise floor for this tile
-    ref_tile = reference_proxy[row_start : row_start + tile_size, col_start : col_start + tile_size]
-    tile_mean = np.mean(ref_tile)
-
-    # Average noise parameters for the luma proxy
-    avg_scale = np.mean(noise_scales)
-    avg_offset = np.mean(noise_offsets)
-
-    # Statistical correction: Luma proxy averaging reduces variance by ~4x
-    # Must account for this so the SAD (from proxy) matches the Noise Model
-    # Since luma proxy weighs greens more, the actual value is
-    # 0.15**2 + 0.35**2 + 0.35**2 + 0.15**2 = 0.29
-    proxy_variance_scale = 0.29
-
-    # Variance of the difference: Var(Ref - Tgt) = Var(Ref) + Var(Tgt) ≈ 2 * Var(Ref)
-    # Assumes that Var(Reference) ≈ Var(Target)
-    # Given the NoiseProfile from the metadata, the noise model is: sigma^2 = g * x + c
-    sigma_sq = max(1e-9, 2.0 * (avg_scale * tile_mean + avg_offset)) * proxy_variance_scale
-    inv_sigma = 1.0 / (np.sqrt(sigma_sq) + 1e-8)
-
-    height, width = reference_proxy.shape
-    min_sad = 1e20
-    best_dy, best_dx = 0, 0
-
-    for dy in range(-max_offset, max_offset + 1):
-        for dx in range(-max_offset, max_offset + 1):
-            # Calculate the intersection of the Target Tile (Ref + offset) and the Target Image
-            # These must be clipped so we don't index out of bounds
-            r_start = max(row_start, -dy, 0)
-            r_end = min(row_start + tile_size, height - dy, height)
-
-            c_start = max(col_start, -dx, 0)
-            c_end = min(col_start + tile_size, width - dx, width)
-
-            if r_start >= r_end or c_start >= c_end:
-                continue
-
-            # Slicing: The target slice must be offset by `dy` and `dx` because it is the 'shifted' version of the reference
-            ref_view = reference_proxy[r_start:r_end, c_start:c_end]
-            tgt_view = target_proxy[r_start + dy : r_end + dy, c_start + dx : c_end + dx]
-
-            # Width Numba per-pixel calculation is faster
-            # np.sum(np.abs(...)) leads to temporary array allocations
-            sad = 0.0
-            rows, cols = ref_view.shape
-            for r in range(rows):
-                for c in range(cols):
-                    # Direct subtraction and absolute value
-                    sad += abs(ref_view[r, c] - tgt_view[r, c])
-
-            # Normalization: If tiles are partially off-image, a smaller area will naturally have a lower SAD.
-            # Divide by area to find the true best match per pixel.
-            # sad = sad / (rows * cols)
-            normalized_sad = (sad * inv_sigma) / (tile_size * tile_size)
-
-            if normalized_sad < min_sad:
-                min_sad = normalized_sad
-                best_dy = dy
-                best_dx = dx
-
-    return best_dy, best_dx, min_sad
-
-
 def get_noise_params_2x2(
     burst_images: list[np.ndarray], metadata: list[dict[str, Any]]
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -279,6 +184,101 @@ def estimate_noise_profile(image: np.ndarray, patch_size: int = 8) -> tuple[np.n
         offsets_grid[row_offset, col_offset] = max(intercept, 1e-9)
 
     return scales_grid, offsets_grid
+
+
+@njit(fastmath=True)
+def find_best_offset(
+    reference_proxy: np.ndarray,
+    target_proxy: np.ndarray,
+    row_start: int,
+    col_start: int,
+    tile_size: int,
+    max_offset: int,
+    noise_scales: np.ndarray,
+    noise_offsets: np.ndarray,
+) -> tuple[int, int, float]:
+    """
+    Finds the integer translation (dy, dx) using Variance-Weighted SAD (VW-SAD).
+
+    The score is normalized by the noise floor (sigma) of the tile, meaning a score of 1.0 indicates
+    that the average pixel difference matches the expected noise level.
+
+    Args:
+        reference_proxy: The reference grayscale image (usually the first frame).
+        target_proxy: The target grayscale image to be aligned.
+        row_start: Top row index of the tile in the proxy coordinate system.
+        col_start: Left column index of the tile in the proxy coordinate system.
+        tile_size: The width/height of the tile in proxy pixels.
+        max_offset: The maximum pixels to search in any direction.
+        noise_scales: 2x2 matrix of shot noises per-channel
+        noise_offsets: 2x2 matrix of matrix read noise per-channel
+
+    Returns:
+        A tuple of (best_dy, best_dx, minimum_sad).
+
+    """
+
+    # 1. Calculate the noise floor for this tile
+    ref_tile = reference_proxy[row_start : row_start + tile_size, col_start : col_start + tile_size]
+    tile_mean = np.mean(ref_tile)
+
+    # Average noise parameters for the luma proxy
+    avg_scale = np.mean(noise_scales)
+    avg_offset = np.mean(noise_offsets)
+
+    # Statistical correction: Luma proxy averaging reduces variance by ~4x
+    # Must account for this so the SAD (from proxy) matches the Noise Model
+    # Since luma proxy weighs greens more, the actual value is
+    # 0.15**2 + 0.35**2 + 0.35**2 + 0.15**2 = 0.29
+    proxy_variance_scale = 0.29
+
+    # Variance of the difference: Var(Ref - Tgt) = Var(Ref) + Var(Tgt) ≈ 2 * Var(Ref)
+    # Assumes that Var(Reference) ≈ Var(Target)
+    # Given the NoiseProfile from the metadata, the noise model is: sigma^2 = g * x + c
+    sigma_sq = max(1e-9, 2.0 * (avg_scale * tile_mean + avg_offset)) * proxy_variance_scale
+    inv_sigma = 1.0 / (np.sqrt(sigma_sq) + 1e-8)
+
+    height, width = reference_proxy.shape
+    min_sad = 1e20
+    best_dy, best_dx = 0, 0
+
+    for dy in range(-max_offset, max_offset + 1):
+        for dx in range(-max_offset, max_offset + 1):
+            # Calculate the intersection of the Target Tile (Ref + offset) and the Target Image
+            # These must be clipped so we don't index out of bounds
+            r_start = max(row_start, -dy, 0)
+            r_end = min(row_start + tile_size, height - dy, height)
+
+            c_start = max(col_start, -dx, 0)
+            c_end = min(col_start + tile_size, width - dx, width)
+
+            if r_start >= r_end or c_start >= c_end:
+                continue
+
+            # Slicing: The target slice must be offset by `dy` and `dx` because it is the 'shifted' version of the reference
+            ref_view = reference_proxy[r_start:r_end, c_start:c_end]
+            tgt_view = target_proxy[r_start + dy : r_end + dy, c_start + dx : c_end + dx]
+
+            # Width Numba per-pixel calculation is faster
+            # np.sum(np.abs(...)) leads to temporary array allocations
+            sad = 0.0
+            rows, cols = ref_view.shape
+            for r in range(rows):
+                for c in range(cols):
+                    # Direct subtraction and absolute value
+                    sad += abs(ref_view[r, c] - tgt_view[r, c])
+
+            # Normalization: If tiles are partially off-image, a smaller area will naturally have a lower SAD.
+            # Divide by area to find the true best match per pixel.
+            # sad = sad / (rows * cols)
+            normalized_sad = (sad * inv_sigma) / (tile_size * tile_size)
+
+            if normalized_sad < min_sad:
+                min_sad = normalized_sad
+                best_dy = dy
+                best_dx = dx
+
+    return best_dy, best_dx, min_sad
 
 
 @njit
