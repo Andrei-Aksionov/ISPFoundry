@@ -1,6 +1,8 @@
 import numpy as np
+import pytest
+from scipy.ndimage import gaussian_filter
 
-from pipeline_steps.align_and_merge import get_luma_proxy
+from pipeline_steps.align_and_merge import find_sharpest_image_idx, get_luma_proxy
 
 
 class TestGetLumaProxy:
@@ -59,3 +61,76 @@ class TestGetLumaProxy:
 
         proxy = get_luma_proxy(raw_image, metadata)
         assert proxy.dtype == np.float32
+
+
+class TestFindSharpestImageIdx:
+    @pytest.fixture
+    def base_metadata(self):
+        return {"color_desc": "RGBG", "raw_pattern": [[0, 1], [3, 2]], "ISO": 100}
+
+    def test_selects_sharpest_image(self, base_metadata):
+        """Test that a sharp image is preferred over a blurred one."""
+        # Image 0: Sharp edges (8x8 blocks so they survive 2x2 downsampling)
+        sharp = np.zeros((32, 32), dtype=np.uint16)
+        row, col = np.indices(sharp.shape)
+        mask = (row // 8 + col // 8) % 2 == 0
+        sharp[mask] = 1000
+
+        # Using a heavy blur on the sharp image to create a realistic 'blurry' frame
+        blurry = gaussian_filter(sharp.astype(float), sigma=4.0).astype(np.uint16)
+
+        images = [blurry, sharp]
+        metadata = [base_metadata] * 2
+
+        best_idx = find_sharpest_image_idx(images, metadata)
+
+        # The sharp image has high-contrast transitions that survive the proxy
+        # downsampling and the sigma=0.5 smoothing.
+        assert best_idx == 1
+
+    def test_noise_robustness(self, base_metadata):
+        """Test that the Gaussian blur prevents high-frequency noise from winning."""
+        # Image 0: Pure random noise (high variance, but not 'sharp' detail)
+        noisy = np.random.randint(400, 600, (32, 32)).astype(np.uint16)
+
+        # Image 1: Clean image with actual structural edges
+        # We make a strong edge that survives the sigma=0.5 blur
+        structural = np.zeros((32, 32), dtype=np.uint16)
+        structural[:16, :] = 800
+
+        images = [noisy, structural]
+        metadata = [base_metadata] * 2
+
+        best_idx = find_sharpest_image_idx(images, metadata)
+
+        # With sigma=0.5, the structural edge should yield higher Laplacian variance
+        # than the suppressed random noise.
+        assert best_idx == 1
+
+    def test_identical_images(self, base_metadata):
+        """Test that it returns the first index if all images are identical."""
+        img = np.full((32, 32), 500, dtype=np.uint16)
+        images = [img, img, img]
+        metadatas = [base_metadata] * 3
+
+        best_idx = find_sharpest_image_idx(images, metadatas)
+        assert best_idx == 0
+
+    def test_handles_different_exposure_proxies(self, base_metadata):
+        """Test that it handles images with different brightness levels correctly."""
+        # Brightness alone shouldn't necessarily dictate sharpness,
+        # but higher contrast edges should score higher.
+
+        low_contrast = np.zeros((32, 32), dtype=np.uint16)
+        row, col = np.indices(low_contrast.shape)
+        mask = (row // 8 + col // 8) % 2 == 0
+        low_contrast[mask] = 100
+
+        high_contrast = low_contrast.copy()
+        high_contrast[mask] *= 10
+
+        images = [low_contrast, high_contrast]
+        metadata = [base_metadata] * 2
+
+        best_idx = find_sharpest_image_idx(images, metadata)
+        assert best_idx == 1

@@ -4,6 +4,7 @@ import numpy as np
 from loguru import logger
 from numba import njit
 from scipy import stats
+from scipy.ndimage import convolve, gaussian_filter
 from tqdm import trange
 
 from base import ISPStep, register_step
@@ -47,6 +48,47 @@ def get_luma_proxy(raw_image: np.ndarray, metadata: dict[str, Any]) -> np.ndarra
     quads = raw_image.reshape(height // 2, 2, width // 2, 2)
     # For every 2x2 block in the image, multiply it element-wise by the weight map and sum the results into a single pixel.
     return np.einsum("hiwj,ij->hw", quads, weights_map).astype(np.float32)
+
+
+def find_sharpest_image_idx(images: list[np.ndarray], metadata: list[dict[str, Any]]) -> int:
+    """
+    Identifies the sharpest frame in a burst to serve as the alignment base.
+
+    This 'Lucky Imaging' selection helps minimize the propagation of motion blur
+    through the pipeline. It uses a Noise-Robust Laplacian Variance method:
+    1. Generates a luma proxy for each frame.
+    2. Applies a light Gaussian blur (sigma=0.5) to prevent sensor noise from
+       being misidentified as sharp edge detail.
+    3. Convolves with a Laplacian kernel and calculates variance to estimate
+       high-frequency content (edge strength).
+
+    Args:
+        images: List of Bayer RAW images (H, W).
+        metadata: List of per-frame metadata dictionaries.
+
+    Returns:
+        int: The index of the frame with the highest relative sharpness.
+
+    """
+
+    kernel = np.array([[0, 1, 0], [1, -4, 1], [0, 1, 0]], dtype=np.float32)  # Simple 3x3 Laplacian kernel
+
+    scores = []
+    for image, mtd in zip(images, metadata):
+        # 1. Recalculate on-the-go to reduce memory footprint
+        luma_proxy = get_luma_proxy(image, mtd)
+        # 2. Light blur to suppress high-frequency noise that mimics sharpness
+        # This ensures we measure actual structural edges, not sensor grain.
+        smoothed = gaussian_filter(luma_proxy, sigma=0.5)
+        # 3. Calculate Laplacian variance
+        scores.append(convolve(smoothed, kernel).var())
+
+    best_idx, best_score = max(enumerate(scores), key=lambda x: x[1])
+    avg_score = sum(scores) / len(scores)
+    improvement = (best_score / avg_score - 1) * 100
+
+    logger.info(f"Lucky Imaging: Selected frame `{best_idx}` ({improvement:+.1f}% sharper than burst average)")
+    return best_idx
 
 
 def get_noise_params_2x2(
@@ -387,15 +429,19 @@ def merge_images(
     if len({x.shape for x in burst_images}) != 1:
         raise ValueError("All images in the burst must have the same shape.")
 
-    num_images = len(burst_images)
-    image_height, image_width = burst_images[0].shape
+    # 1. Find the image with the highest sharpness
+    sharpest_image_idx = find_sharpest_image_idx(burst_images, metadata)
+    # The sharpest image will be our reference, other images will be merged into it
+    reference_image = burst_images[sharpest_image_idx]
+    reference_metadata = metadata[sharpest_image_idx]
+    image_height, image_width = reference_image.shape
 
-    # 1. Initialize accumulation buffers
-    merged_accumulator = burst_images[0].astype(np.float32, copy=True)
+    # 2. Initialize accumulation buffers
+    merged_accumulator = reference_image.astype(np.float32, copy=True)
     weights_accumulator = np.ones((image_height, image_width), dtype=np.float32)
 
     # 2. Generate reference grayscale proxy for alignment
-    reference_luma_proxy = get_luma_proxy(burst_images[0], metadata[0])
+    reference_luma_proxy = get_luma_proxy(reference_image, reference_metadata)
     proxy_height, proxy_width = reference_luma_proxy.shape
     if image_height // proxy_height != image_width // proxy_width:
         raise RuntimeError("Downsampling scale for luma proxy is uneven for width and height.")
@@ -429,7 +475,10 @@ def merge_images(
     proxy_cols = list(range(0, proxy_width - proxy_tile_size, proxy_stride))
     proxy_cols.append(proxy_width - proxy_tile_size)  # Edge coverage
 
-    for img_idx in trange(1, num_images, desc="Align&Merge (Images)", leave=True, position=0):
+    for img_idx in trange(len(burst_images), desc="Align&Merge (Images)", leave=True, position=0):
+        # don't need to merge the sharpest image (reference image) into itself
+        if img_idx == sharpest_image_idx:
+            continue
         target_luma_proxy = get_luma_proxy(burst_images[img_idx], metadata[img_idx])
         for proxy_row in proxy_rows:
             for proxy_col in proxy_cols:
