@@ -479,8 +479,8 @@ def merge_images(
     image_height, image_width = reference_image.shape
 
     # 2. Initialize accumulation buffers
-    merged_accumulator = reference_image.astype(np.float32, copy=True)
-    weights_accumulator = np.ones((image_height, image_width), dtype=np.float32)
+    merged_accumulator = np.zeros((image_height, image_width), dtype=np.float32)
+    weights_accumulator = np.zeros((image_height, image_width), dtype=np.float32)
 
     # 2. Generate reference grayscale proxy for alignment
     reference_luma_proxy = get_luma_proxy(reference_image, reference_metadata)
@@ -518,23 +518,27 @@ def merge_images(
     proxy_cols = list(range(0, proxy_width - proxy_tile_size, proxy_stride))
     proxy_cols.append(proxy_width - proxy_tile_size)  # Edge coverage
 
+    # Note: we need to loop through the reference image using the same tiling logic as the target images.
+    # This ensures the spatial weights (the "window sum") are perfectly uniform across the frame.
     for img_idx in trange(len(burst_images), desc="Align&Merge (Images)", leave=True, position=0):
-        # don't need to merge the sharpest image (reference image) into itself
-        if img_idx == sharpest_image_idx:
-            continue
-        target_luma_proxy = get_luma_proxy(burst_images[img_idx], metadata[img_idx])
+        if img_idx != sharpest_image_idx:
+            target_luma_proxy = get_luma_proxy(burst_images[img_idx], metadata[img_idx])
+
         for proxy_row in proxy_rows:
             for proxy_col in proxy_cols:
-                row_offset, col_offset, score = find_best_offset(
-                    reference_proxy=reference_luma_proxy,
-                    target_proxy=target_luma_proxy,
-                    row_start=proxy_row,
-                    col_start=proxy_col,
-                    tile_size=proxy_tile_size,
-                    max_offset=proxy_max_offset,
-                    noise_scales=noise_scales,
-                    noise_offsets=noise_offsets,
-                )
+                if img_idx == sharpest_image_idx:
+                    row_offset, col_offset, score = 0, 0, 0
+                else:
+                    row_offset, col_offset, score = find_best_offset(
+                        reference_proxy=reference_luma_proxy,
+                        target_proxy=target_luma_proxy,
+                        row_start=proxy_row,
+                        col_start=proxy_col,
+                        tile_size=proxy_tile_size,
+                        max_offset=proxy_max_offset,
+                        noise_scales=noise_scales,
+                        noise_offsets=noise_offsets,
+                    )
 
                 # Merging is done on full-res image, thus size_scaler is used
                 merge_tile(
