@@ -231,7 +231,21 @@ def estimate_noise_profile(image: np.ndarray, patch_size: int = 8) -> tuple[np.n
 
 
 def get_hann_window_2d(tile_size: int) -> np.ndarray:
-    """Generates the spatial window from the C++ logic."""
+    """
+    Generates a 2D Hann (raised cosine) window for seamless tile blending.
+
+    The window tapers to zero at the edges, ensuring that when tiles with 50% overlap are summed,
+    the spatial weights add up to a constant 1.0.
+    The 0.5 pixel offset aligns the cosine curve to pixel centers.
+
+    Args:
+        tile_size: The width and height of the square tile in pixels.
+
+    Returns:
+        A 2D array of shape (tile_size, tile_size) containing the
+        normalized blending weights.
+
+    """
 
     pos = np.arange(tile_size)
     # The (pos + 0.5) ensures the window is centered on pixels
@@ -349,7 +363,7 @@ def merge_tile(
     col_offset: int,
     sad_score: float,
     tile_size: int,
-    hann_window: np.ndarray,
+    blending_window: np.ndarray,
     k: float,
     use_l2_kernel: bool = False,
 ) -> None:
@@ -368,6 +382,10 @@ def merge_tile(
         col_offset: Offset in col/x/width direction for the target image's tile.
         sad_score: SAD value from the proxy alignment step.
         tile_size: The width/height of the tile in full-res pixels.
+        blending_window :
+            A 2D weight map (e.g., Hann or Gaussian) applied to each tile to
+            taper edges and ensure seamless transitions between overlapping
+            regions. Should match the tile dimensions.
         k:
            - High k (4.0 - 12.0): Promotes temporal averaging (ideal for high-ISO denoising).
            - Low k (0.5 - 1.0): Promotes frame rejection (ideal for sharp motion/ghosting).
@@ -397,7 +415,7 @@ def merge_tile(
     for r in range(r_start, r_end):
         for c in range(c_start, c_end):
             val = target_image[r + row_offset, c + col_offset]
-            combined_weight = weight * hann_window[r - row_start, c - col_start]
+            combined_weight = weight * blending_window[r - row_start, c - col_start]
             merged_accumulator[r, c] += val * combined_weight
             weights_accumulator[r, c] += combined_weight
 
@@ -531,7 +549,7 @@ def merge_images(
                     row_start=proxy_row * size_scaler,
                     col_start=proxy_col * size_scaler,
                     tile_size=tile_size,
-                    hann_window=hann_window,
+                    blending_window=hann_window,
                     k=k_adaptive,
                 )
 
