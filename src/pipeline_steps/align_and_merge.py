@@ -9,6 +9,8 @@ from tqdm import trange
 
 from base import ISPStep, register_step
 
+# ---------------------------------------- Utility functions -----------------------------------------
+
 
 def get_luma_proxy(raw_image: np.ndarray, metadata: dict[str, Any]) -> np.ndarray:
     """
@@ -151,7 +153,7 @@ def get_noise_params_2x2(
         return scales_grid, offsets_grid
 
     # Case B: Fallback to empirical estimation
-    logger.warning("NoiseProfile missing for %s. Estimating noise from reference frame.", mtd.get("Model", "Unknown"))
+    logger.warning("NoiseProfile missing for %s. Estimating noise from reference frame." % mtd.get("Model", "Unknown"))
     return estimate_noise_profile(ref_image)
 
 
@@ -226,6 +228,33 @@ def estimate_noise_profile(image: np.ndarray, patch_size: int = 8) -> tuple[np.n
         offsets_grid[row_offset, col_offset] = max(intercept, 1e-9)
 
     return scales_grid, offsets_grid
+
+
+def get_hann_window_2d(tile_size: int) -> np.ndarray:
+    """
+    Generates a 2D Hann (raised cosine) window for seamless tile blending.
+
+    The window tapers to zero at the edges, ensuring that when tiles with 50% overlap are summed,
+    the spatial weights add up to a constant 1.0.
+    The 0.5 pixel offset aligns the cosine curve to pixel centers.
+
+    Args:
+        tile_size: The width and height of the square tile in pixels.
+
+    Returns:
+        A 2D array of shape (tile_size, tile_size) containing the
+        normalized blending weights.
+
+    """
+
+    pos = np.arange(tile_size, dtype=np.float32)
+    # The (pos + 0.5) ensures the window is centered on pixels
+    w_1d = 0.5 * (1 - np.cos(2 * np.pi * (pos + 0.5) / tile_size))
+    # Create 2D map via outer product
+    return np.outer(w_1d, w_1d)
+
+
+# ----------------------------------------- Merging function -----------------------------------------
 
 
 @njit(fastmath=True)
@@ -312,7 +341,6 @@ def find_best_offset(
 
             # Normalization: If tiles are partially off-image, a smaller area will naturally have a lower SAD.
             # Divide by area to find the true best match per pixel.
-            # sad = sad / (rows * cols)
             normalized_sad = (sad * inv_sigma) / (tile_size * tile_size)
 
             if normalized_sad < min_sad:
@@ -334,6 +362,7 @@ def merge_tile(
     col_offset: int,
     sad_score: float,
     tile_size: int,
+    blending_window: np.ndarray,
     k: float,
     use_l2_kernel: bool = False,
 ) -> None:
@@ -352,6 +381,10 @@ def merge_tile(
         col_offset: Offset in col/x/width direction for the target image's tile.
         sad_score: SAD value from the proxy alignment step.
         tile_size: The width/height of the tile in full-res pixels.
+        blending_window :
+            A 2D weight map (e.g., Hann or Gaussian) applied to each tile to
+            taper edges and ensure seamless transitions between overlapping
+            regions. Should match the tile dimensions.
         k:
            - High k (4.0 - 12.0): Promotes temporal averaging (ideal for high-ISO denoising).
            - Low k (0.5 - 1.0): Promotes frame rejection (ideal for sharp motion/ghosting).
@@ -380,10 +413,10 @@ def merge_tile(
     # In-place accumulation (ideal for Numba)
     for r in range(r_start, r_end):
         for c in range(c_start, c_end):
-            # Target pixel is at (r + dy, c + dx)
             val = target_image[r + row_offset, c + col_offset]
-            merged_accumulator[r, c] += val * weight
-            weights_accumulator[r, c] += weight
+            combined_weight = weight * blending_window[r - row_start, c - col_start]
+            merged_accumulator[r, c] += val * combined_weight
+            weights_accumulator[r, c] += combined_weight
 
 
 @register_step(ISPStep.ALIGN_AND_MERGE)
@@ -391,7 +424,6 @@ def merge_images(
     burst_images: list[np.ndarray],
     metadata: list[dict[str, Any]],
     tile_size: int = 32,
-    tile_stride: int = 16,
     max_search_offset: int = 8,
 ) -> np.ndarray:
     """
@@ -408,8 +440,6 @@ def merge_images(
             exposure time, black level).
         tile_size: The width/height of the processing tile in full-resolution pixels.
             Must be a multiple of the downsampling factor (usually 2).
-        tile_stride: The step size between tiles in full-resolution pixels. Smaller
-            strides increase overlap and reduce tiling artifacts but increase compute time.
         max_search_offset: The maximum distance (in full-res pixels) the algorithm
             will search for a matching block in any direction.
 
@@ -429,6 +459,9 @@ def merge_images(
     if len({x.shape for x in burst_images}) != 1:
         raise ValueError("All images in the burst must have the same shape.")
 
+    if not all(metadata[0]["ExposureTime"] != mtd["ExposureTime"] for mtd in metadata[1:]):
+        logger.warning("The burst contains images with different exposures. Bracketing is not yet supported. ")
+
     # 1. Find the image with the highest sharpness
     sharpest_image_idx = find_sharpest_image_idx(burst_images, metadata)
     # The sharpest image will be our reference, other images will be merged into it
@@ -437,8 +470,8 @@ def merge_images(
     image_height, image_width = reference_image.shape
 
     # 2. Initialize accumulation buffers
-    merged_accumulator = reference_image.astype(np.float32, copy=True)
-    weights_accumulator = np.ones((image_height, image_width), dtype=np.float32)
+    merged_accumulator = np.zeros((image_height, image_width), dtype=np.float32)
+    weights_accumulator = np.zeros((image_height, image_width), dtype=np.float32)
 
     # 2. Generate reference grayscale proxy for alignment
     reference_luma_proxy = get_luma_proxy(reference_image, reference_metadata)
@@ -452,6 +485,7 @@ def merge_images(
         logger.warning("Luma proxy is scaled by an odd number: merging can cause catastrophic color artifacts.")
 
     # 3. Parameters for block matching
+    tile_stride = tile_size // 2
     proxy_tile_size = tile_size // size_scaler
     proxy_stride = tile_stride // size_scaler
     proxy_max_offset = max_search_offset // size_scaler
@@ -468,6 +502,7 @@ def merge_images(
     k_adaptive = 1.0 + (0.5 * stops)
 
     # 5. Main loop: block-matching and merging
+    hann_window = get_hann_window_2d(tile_size)
 
     # Pre-calculate tile start positions to ensure we hit the bottom/right edges
     proxy_rows = list(range(0, proxy_height - proxy_tile_size, proxy_stride))
@@ -475,23 +510,27 @@ def merge_images(
     proxy_cols = list(range(0, proxy_width - proxy_tile_size, proxy_stride))
     proxy_cols.append(proxy_width - proxy_tile_size)  # Edge coverage
 
+    # Note: we need to loop through the reference image using the same tiling logic as the target images.
+    # This ensures the spatial weights (the "window sum") are perfectly uniform across the frame.
     for img_idx in trange(len(burst_images), desc="Align&Merge (Images)", leave=True, position=0):
-        # don't need to merge the sharpest image (reference image) into itself
-        if img_idx == sharpest_image_idx:
-            continue
-        target_luma_proxy = get_luma_proxy(burst_images[img_idx], metadata[img_idx])
+        if img_idx != sharpest_image_idx:
+            target_luma_proxy = get_luma_proxy(burst_images[img_idx], metadata[img_idx])
+
         for proxy_row in proxy_rows:
             for proxy_col in proxy_cols:
-                row_offset, col_offset, score = find_best_offset(
-                    reference_proxy=reference_luma_proxy,
-                    target_proxy=target_luma_proxy,
-                    row_start=proxy_row,
-                    col_start=proxy_col,
-                    tile_size=proxy_tile_size,
-                    max_offset=proxy_max_offset,
-                    noise_scales=noise_scales,
-                    noise_offsets=noise_offsets,
-                )
+                if img_idx == sharpest_image_idx:
+                    row_offset, col_offset, score = 0, 0, 0
+                else:
+                    row_offset, col_offset, score = find_best_offset(
+                        reference_proxy=reference_luma_proxy,
+                        target_proxy=target_luma_proxy,
+                        row_start=proxy_row,
+                        col_start=proxy_col,
+                        tile_size=proxy_tile_size,
+                        max_offset=proxy_max_offset,
+                        noise_scales=noise_scales,
+                        noise_offsets=noise_offsets,
+                    )
 
                 # Merging is done on full-res image, thus size_scaler is used
                 merge_tile(
@@ -504,6 +543,7 @@ def merge_images(
                     row_start=proxy_row * size_scaler,
                     col_start=proxy_col * size_scaler,
                     tile_size=tile_size,
+                    blending_window=hann_window,
                     k=k_adaptive,
                 )
 

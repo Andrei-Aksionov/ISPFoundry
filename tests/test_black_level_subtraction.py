@@ -160,7 +160,6 @@ class TestNormalizeImage:
         subtracted = subtract_black_levels(sample_raw_image, sample_metadata, inplace=False)
         normalized = normalize_image(subtracted, sample_metadata, inplace=False)
         assert not np.shares_memory(normalized, subtracted)
-        # Normalize: (value) / (white - black)
         expected = subtracted.copy()
         black_levels = sample_metadata["BlackLevel"]
         white_level = sample_metadata["WhiteLevel"]

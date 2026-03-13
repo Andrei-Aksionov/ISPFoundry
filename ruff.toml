@@ -10,6 +10,7 @@ lint.select = [
   "DOC",
   "C4", # flake8-comprehensions
   "E", # pycodestyle Error
+  "ERA001", # commented-out-code
   "F", # PyFlakes
   "I001", # isort: unsorted-imports
   "PT", # flake8-pytest-style
