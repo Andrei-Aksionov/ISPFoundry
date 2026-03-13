@@ -341,7 +341,6 @@ def find_best_offset(
 
             # Normalization: If tiles are partially off-image, a smaller area will naturally have a lower SAD.
             # Divide by area to find the true best match per pixel.
-            # sad = sad / (rows * cols)
             normalized_sad = (sad * inv_sigma) / (tile_size * tile_size)
 
             if normalized_sad < min_sad:
@@ -526,7 +525,6 @@ def merge_images(
         target_luma_proxy = get_luma_proxy(burst_images[img_idx], metadata[img_idx])
         for proxy_row in proxy_rows:
             for proxy_col in proxy_cols:
-                # print(f"{proxy_row=} | {proxy_col=}")
                 row_offset, col_offset, score = find_best_offset(
                     reference_proxy=reference_luma_proxy,
                     target_proxy=target_luma_proxy,

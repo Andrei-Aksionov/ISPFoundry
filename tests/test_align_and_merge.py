@@ -30,7 +30,7 @@ class TestGetLumaProxy:
             "raw_pattern": [[0, 1], [3, 2]],  # R, Gr, Gb, B
         }
 
-        # Calculation: (100 * 0.15) + (200 * 0.35) + (300 * 0.35) + (400 * 0.15)
+        # Calculation: (100 * 0.15) + (200 * 0.35) + (300 * 0.35) + (400 * 0.15)  # noqa: ERA001
         # 15 + 70 + 105 + 60 = 250
         expected_value = 250.0
 
