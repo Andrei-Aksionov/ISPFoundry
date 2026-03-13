@@ -9,6 +9,8 @@ from tqdm import trange
 
 from base import ISPStep, register_step
 
+# ---------------------------------------- Utility functions -----------------------------------------
+
 
 def get_luma_proxy(raw_image: np.ndarray, metadata: dict[str, Any]) -> np.ndarray:
     """
@@ -151,7 +153,7 @@ def get_noise_params_2x2(
         return scales_grid, offsets_grid
 
     # Case B: Fallback to empirical estimation
-    logger.warning("NoiseProfile missing for %s. Estimating noise from reference frame.", mtd.get("Model", "Unknown"))
+    logger.warning("NoiseProfile missing for %s. Estimating noise from reference frame." % mtd.get("Model", "Unknown"))
     return estimate_noise_profile(ref_image)
 
 
@@ -226,6 +228,19 @@ def estimate_noise_profile(image: np.ndarray, patch_size: int = 8) -> tuple[np.n
         offsets_grid[row_offset, col_offset] = max(intercept, 1e-9)
 
     return scales_grid, offsets_grid
+
+
+def get_hann_window_2d(tile_size: int) -> np.ndarray:
+    """Generates the spatial window from the C++ logic."""
+
+    pos = np.arange(tile_size)
+    # The (pos + 0.5) ensures the window is centered on pixels
+    w_1d = 0.5 * (1 - np.cos(2 * np.pi * (pos + 0.5) / tile_size))
+    # Create 2D map via outer product
+    return np.outer(w_1d, w_1d)
+
+
+# ----------------------------------------- Merging function -----------------------------------------
 
 
 @njit(fastmath=True)
@@ -334,6 +349,7 @@ def merge_tile(
     col_offset: int,
     sad_score: float,
     tile_size: int,
+    hann_window: np.ndarray,
     k: float,
     use_l2_kernel: bool = False,
 ) -> None:
@@ -380,12 +396,13 @@ def merge_tile(
     # In-place accumulation (ideal for Numba)
     for r in range(r_start, r_end):
         for c in range(c_start, c_end):
-            # Target pixel is at (r + dy, c + dx)
             val = target_image[r + row_offset, c + col_offset]
-            merged_accumulator[r, c] += val * weight
-            weights_accumulator[r, c] += weight
+            combined_weight = weight * hann_window[r - row_start, c - col_start]
+            merged_accumulator[r, c] += val * combined_weight
+            weights_accumulator[r, c] += combined_weight
 
 
+# TODO (andrei aksionau): perhaps get rid of tile_stride and max_search_offset altogether
 @register_step(ISPStep.ALIGN_AND_MERGE)
 def merge_images(
     burst_images: list[np.ndarray],
@@ -429,6 +446,14 @@ def merge_images(
     if len({x.shape for x in burst_images}) != 1:
         raise ValueError("All images in the burst must have the same shape.")
 
+    if not all(metadata[0]["ExposureTime"] != mtd["ExposureTime"] for mtd in metadata[1:]):
+        logger.warning("The burst contains images with different exposures. Bracketing is not yet supported. ")
+
+    if not tile_size // tile_stride == 2:
+        raise ValueError(
+            f"The code assumes 50% tiles overlap, but got tile size of {tile_size} and stride of {tile_stride}"
+        )
+
     # 1. Find the image with the highest sharpness
     sharpest_image_idx = find_sharpest_image_idx(burst_images, metadata)
     # The sharpest image will be our reference, other images will be merged into it
@@ -468,6 +493,7 @@ def merge_images(
     k_adaptive = 1.0 + (0.5 * stops)
 
     # 5. Main loop: block-matching and merging
+    hann_window = get_hann_window_2d(tile_size)
 
     # Pre-calculate tile start positions to ensure we hit the bottom/right edges
     proxy_rows = list(range(0, proxy_height - proxy_tile_size, proxy_stride))
@@ -482,6 +508,7 @@ def merge_images(
         target_luma_proxy = get_luma_proxy(burst_images[img_idx], metadata[img_idx])
         for proxy_row in proxy_rows:
             for proxy_col in proxy_cols:
+                # print(f"{proxy_row=} | {proxy_col=}")
                 row_offset, col_offset, score = find_best_offset(
                     reference_proxy=reference_luma_proxy,
                     target_proxy=target_luma_proxy,
@@ -504,6 +531,7 @@ def merge_images(
                     row_start=proxy_row * size_scaler,
                     col_start=proxy_col * size_scaler,
                     tile_size=tile_size,
+                    hann_window=hann_window,
                     k=k_adaptive,
                 )
 
