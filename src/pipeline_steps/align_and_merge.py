@@ -247,7 +247,7 @@ def get_hann_window_2d(tile_size: int) -> np.ndarray:
 
     """
 
-    pos = np.arange(tile_size)
+    pos = np.arange(tile_size, dtype=np.float32)
     # The (pos + 0.5) ensures the window is centered on pixels
     w_1d = 0.5 * (1 - np.cos(2 * np.pi * (pos + 0.5) / tile_size))
     # Create 2D map via outer product

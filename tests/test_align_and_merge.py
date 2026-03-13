@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from scipy.ndimage import gaussian_filter
 
-from pipeline_steps.align_and_merge import find_sharpest_image_idx, get_luma_proxy
+from pipeline_steps.align_and_merge import find_sharpest_image_idx, get_hann_window_2d, get_luma_proxy
 
 
 class TestGetLumaProxy:
@@ -118,9 +118,9 @@ class TestFindSharpestImageIdx:
 
     def test_handles_different_exposure_proxies(self, base_metadata):
         """Test that it handles images with different brightness levels correctly."""
+
         # Brightness alone shouldn't necessarily dictate sharpness,
         # but higher contrast edges should score higher.
-
         low_contrast = np.zeros((32, 32), dtype=np.uint16)
         row, col = np.indices(low_contrast.shape)
         mask = (row // 8 + col // 8) % 2 == 0
@@ -134,3 +134,63 @@ class TestFindSharpestImageIdx:
 
         best_idx = find_sharpest_image_idx(images, metadata)
         assert best_idx == 1
+
+
+class TestGetHannWindow2D:
+    def test_hann_window_dimensions(self):
+        """Ensure the window matches the requested tile size."""
+        tile_size = 32
+        window = get_hann_window_2d(tile_size)
+        assert window.shape == (tile_size, tile_size)
+        assert window.dtype == np.float32
+
+    def test_hann_window_symmetry(self):
+        """Ensure the window is symmetric along both axes."""
+        tile_size = 16
+        window = get_hann_window_2d(tile_size)
+
+        # Check horizontal and vertical symmetry
+        assert np.allclose(window, np.flipud(window))
+        assert np.allclose(window, np.fliplr(window))
+        # Check diagonal symmetry (it's a square outer product)
+        assert np.allclose(window, window.T)
+
+    def test_hann_window_unity_gain(self):
+        """
+        The most critical test: check the Partition of Unity property.
+
+        When overlapped by 50% (stride = size // 2), weights must sum to 1.0.
+        """
+        tile_size = 32
+        stride = tile_size // 2
+        window = get_hann_window_2d(tile_size)
+
+        # Simulate a 2x2 grid of overlapping tiles
+        # The overlap area (the center of the grid) should sum to exactly 1.0
+        canvas_size = tile_size + stride
+        weight_map = np.zeros((canvas_size, canvas_size))
+
+        offsets = [0, stride]
+        for row_offset in offsets:
+            for col_offset in offsets:
+                weight_map[row_offset : row_offset + tile_size, col_offset : col_offset + tile_size] += window
+
+        # Check the central 'stride x stride' region where all 4 tiles overlap
+        overlap_region = weight_map[stride:tile_size, stride:tile_size]
+
+        # In a 2D Hann window with 50% overlap, the sum is 1.0
+        assert np.allclose(overlap_region, 1.0)
+
+    def test_hann_window_boundary_values(self):
+        """Check that the window tapers toward zero at the very edges."""
+        tile_size = 8
+        window = get_hann_window_2d(tile_size)
+
+        # With the 0.5 offset, the values aren't exactly 0 at indices 0 and N-1,
+        # but they should be small and identical.
+        np.testing.assert_almost_equal(window[0, 0], window[7, 7])
+        assert window[0, 0] < 0.05
+
+        # The center of the window should have the highest weight
+        center = tile_size // 2
+        assert window[center, center] > window[0, 0]
