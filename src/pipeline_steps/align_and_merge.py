@@ -419,13 +419,11 @@ def merge_tile(
             weights_accumulator[r, c] += combined_weight
 
 
-# TODO (andrei aksionau): perhaps get rid of tile_stride and max_search_offset altogether
 @register_step(ISPStep.ALIGN_AND_MERGE)
 def merge_images(
     burst_images: list[np.ndarray],
     metadata: list[dict[str, Any]],
     tile_size: int = 32,
-    tile_stride: int = 16,
     max_search_offset: int = 8,
 ) -> np.ndarray:
     """
@@ -442,8 +440,6 @@ def merge_images(
             exposure time, black level).
         tile_size: The width/height of the processing tile in full-resolution pixels.
             Must be a multiple of the downsampling factor (usually 2).
-        tile_stride: The step size between tiles in full-resolution pixels. Smaller
-            strides increase overlap and reduce tiling artifacts but increase compute time.
         max_search_offset: The maximum distance (in full-res pixels) the algorithm
             will search for a matching block in any direction.
 
@@ -465,11 +461,6 @@ def merge_images(
 
     if not all(metadata[0]["ExposureTime"] != mtd["ExposureTime"] for mtd in metadata[1:]):
         logger.warning("The burst contains images with different exposures. Bracketing is not yet supported. ")
-
-    if not tile_size // tile_stride == 2:
-        raise ValueError(
-            f"The code assumes 50% tiles overlap, but got tile size of {tile_size} and stride of {tile_stride}"
-        )
 
     # 1. Find the image with the highest sharpness
     sharpest_image_idx = find_sharpest_image_idx(burst_images, metadata)
@@ -494,6 +485,7 @@ def merge_images(
         logger.warning("Luma proxy is scaled by an odd number: merging can cause catastrophic color artifacts.")
 
     # 3. Parameters for block matching
+    tile_stride = tile_size // 2
     proxy_tile_size = tile_size // size_scaler
     proxy_stride = tile_stride // size_scaler
     proxy_max_offset = max_search_offset // size_scaler
