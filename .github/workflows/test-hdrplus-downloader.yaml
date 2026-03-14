@@ -2,8 +2,12 @@ name: Test with HDR+ Dataset downloader
 on:
   push:
     branches: [main]
+    paths: &shared_paths
+      - tests/test_datasets.py
+      - src/datasets/hdrplus_downloader.py
   pull_request:
     branches: [main]
+    paths: *shared_paths
 
 jobs:
   download-and-test:
