@@ -5,6 +5,7 @@ on:
     paths: &shared_paths
       - tests/test_datasets.py
       - src/datasets/hdrplus_downloader.py
+      - .github/workflows/test-hdrplus-downloader.yaml
   pull_request:
     branches: [main]
     paths: *shared_paths
