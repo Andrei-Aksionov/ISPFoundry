@@ -87,7 +87,7 @@ def find_sharpest_image_idx(images: list[np.ndarray], metadata: list[dict[str, A
 
     best_idx, best_score = max(enumerate(scores), key=lambda x: x[1])
     avg_score = sum(scores) / len(scores)
-    improvement = (best_score / avg_score - 1) * 100
+    improvement = (best_score / (avg_score - 1 + 1e-9)) * 100
 
     logger.info(f"Lucky Imaging: Selected frame `{best_idx}` ({improvement:+.1f}% sharper than burst average)")
     return best_idx
@@ -305,15 +305,14 @@ def sample_raw_bilinear(
     # Coordinates for the 2x2 same-color grid
     row_top = row_base + row_shift_base
     col_left = col_base + col_shift_base
-    row_bottom = row_top + 2
-    col_right = col_left + 2
+    # Stay in bounds while maintaining Bayer phase
+    row_bottom = row_top + 2 if row_top + 2 < height else row_top
+    col_right = col_left + 2 if col_left + 2 < width else col_left
 
     # 3. Boundary Guard: If the 2-pixel stride goes off-sensor,
     # we clamp to the base pixel to prevent crashes and maintain parity.
     row_top = max(0, min(row_top, height - 1))
     row_bottom = max(0, min(row_bottom, height - 1))
-    col_left = max(0, min(col_left, width - 1))
-    col_right = max(0, min(col_right, width - 1))
 
     # 4. Calculate fractional distances [0.0, 1.0] within the 2-pixel gap.
     # Example: if row_offset is 0.5, row_lerp is 0.25 (a quarter of the 2-pixel jump).

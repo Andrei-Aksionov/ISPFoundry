@@ -2,7 +2,12 @@ import numpy as np
 import pytest
 from scipy.ndimage import gaussian_filter
 
-from pipeline_steps.align_and_merge import find_sharpest_image_idx, get_hann_window_2d, get_luma_proxy
+from pipeline_steps.align_and_merge import (
+    find_sharpest_image_idx,
+    get_hann_window_2d,
+    get_luma_proxy,
+    sample_raw_bilinear,
+)
 
 
 class TestGetLumaProxy:
@@ -194,3 +199,133 @@ class TestGetHannWindow2D:
         # The center of the window should have the highest weight
         center = tile_size // 2
         assert window[center, center] > window[0, 0]
+
+
+class TestSampleRawBilinear:
+    @pytest.fixture
+    def bayer_grid(self):
+        """
+        Creates a 10x10 synthetic Bayer-like grid.
+
+        Even rows/cols (0,0): 100.0 (e.g., Red)
+        Even rows, Odd cols (0,1): 50.0  (e.g., Green 1)
+        Odd rows, Even cols (1,0): 25.0  (e.g., Green 2)
+        Odd rows, Odd cols (1,1): 10.0   (e.g., Blue)
+        """
+        grid = np.zeros((10, 10), dtype=np.float32)
+        grid[0::2, 0::2] = 100.0
+        grid[0::2, 1::2] = 50.0
+        grid[1::2, 0::2] = 25.0
+        grid[1::2, 1::2] = 10.0
+        return grid
+
+    def test_integer_multiples_of_two(self, bayer_grid):
+        """Verify that offsets of 2, 4, etc., return exact pixel values (Fast Path)."""
+        row_base, col_base = 2, 2
+        # Shift by 2 pixels vertically and 4 pixels horizontally
+        val = sample_raw_bilinear(bayer_grid, row_base, col_base, 2.0, 4.0)
+
+        # Expected: bayer_grid[4, 6] which is an 'Even, Even' site (100.0)
+        assert val == 100.0
+        assert isinstance(val, (float, np.float32))
+
+    def test_fractional_midpoint(self, bayer_grid):
+        """Verify that a 1.0 offset (midpoint of a 2-pixel stride) returns a 50/50 mix."""
+        row_base, col_base = 2, 2
+        # row_offset 1.0 is halfway between index 2 and index 4
+        # bayer_grid[2, 2] = 100.0, bayer_grid[4, 2] = 100.0
+        # result should be 100.0
+        val_vertical = sample_raw_bilinear(bayer_grid, row_base, col_base, 1.0, 0.0)
+        assert np.isclose(val_vertical, 100.0)
+
+        # Now test across a gradient
+        # Let's modify a pixel to create a difference
+        bayer_grid[2, 4] = 200.0
+        # Halfway between bayer_grid[2, 2] (100.0) and bayer_grid[2, 4] (200.0)
+        val_horizontal = sample_raw_bilinear(bayer_grid, row_base, col_base, 0.0, 1.0)
+        assert np.isclose(val_horizontal, 150.0)
+
+    def test_subpixel_bilinear_quad(self, bayer_grid):
+        """Verify interpolation within a 2x2 same-color quad."""
+        # Setup a 2x2 grid of the same color (Red sites at 2,2; 2,4; 4,2; 4,4)
+        # We'll set them to different values to test the bilinear mix
+        row_base, col_base = 2, 2
+        bayer_grid[2, 2] = 10.0
+        bayer_grid[2, 4] = 20.0
+        bayer_grid[4, 2] = 30.0
+        bayer_grid[4, 4] = 40.0
+
+        # Sample at offset (0.5, 0.5)
+        # In our 2-pixel stride, 0.5 is 25% of the way to the next neighbor.
+        # lerp_weight = 0.5 / 2.0 = 0.25
+        val = sample_raw_bilinear(bayer_grid, row_base, col_base, 0.5, 0.5)
+
+        # Expected calculation:
+        # top_mix = 10 + 0.25 * (20 - 10) = 12.5
+        # bottom_mix = 30 + 0.25 * (40 - 30) = 32.5
+        # final = 12.5 + 0.25 * (32.5 - 12.5) = 17.5
+        assert np.isclose(val, 17.5)
+
+    def test_boundary_clamping_preserves_color(self, bayer_grid):
+        """Verify that sampling near the edge doesn't pull signal from the wrong Bayer color (phase) due to naive index clamping."""
+        height, width = bayer_grid.shape
+        # Base is the last Red site (8, 8) in a 10x10 grid.
+        row_base, col_base = 8, 8
+
+        # If we sample with an offset of 0.5, row_bottom would be 10 (OOB).
+        # Our phase-aware logic should clamp row_bottom to row_top (8).
+        val = sample_raw_bilinear(bayer_grid, row_base, col_base, 0.5, 0.5)
+
+        # If clamping works, it should ignore the fractional distance because
+        # there is no 'next' Red neighbor to interpolate with.
+        # Expected: exactly the value at [8, 8]
+        assert np.isclose(val, bayer_grid[8, 8])
+
+    def test_negative_offsets(self, bayer_grid):
+        """Verify that negative offsets (moving 'up' or 'left') work as expected."""
+        # Start in the middle
+        row_base, col_base = 4, 4
+        bayer_grid[2, 4] = 50.0
+        bayer_grid[4, 4] = 100.0
+
+        # Shift 'up' by 2 pixels
+        val = sample_raw_bilinear(bayer_grid, row_base, col_base, -2.0, 0.0)
+        assert val == 50.0
+
+    def test_negative_fractional_offset(self, bayer_grid):
+        """
+        Verify sub-pixel interpolation with negative fractional offsets.
+
+        This tests the transition logic when moving 'backwards' on the grid.
+        """
+        # Start at a known center point
+        row_base, col_base = 4, 4
+
+        # Setup the 2x2 same-color quad that sits 'above' and 'left' of our base
+        # Neighbors are at (2,2), (2,4), (4,2), (4,4)
+        bayer_grid[2, 2] = 100.0  # Top-Left
+        bayer_grid[2, 4] = 200.0  # Top-Right
+        bayer_grid[4, 2] = 300.0  # Bottom-Left
+        bayer_grid[4, 4] = 400.0  # Bottom-Right (the original base)
+
+        # We want to sample halfway between row 2 and 4, and halfway between col 2 and 4.
+        # This corresponds to a shift of -1.0 on both axes relative to (4,4).
+        # row_offset = -1.0 -> row_shift_base = floor(-1.0 / 2) * 2 = -2
+        # row_lerp = (-1.0 - (-2)) / 2 = 0.5 (exact midpoint)
+        val_mid = sample_raw_bilinear(bayer_grid, row_base, col_base, -1.0, -1.0)
+
+        # Expected midpoint calculation:
+        # (100 + 200 + 300 + 400) / 4 = 250.0
+        assert np.isclose(val_mid, 250.0)
+
+        # Test a more granular fractional shift: -0.5
+        # row_shift_base = floor(-0.5 / 2) * 2 = -2
+        # row_lerp = (-0.5 - (-2)) / 2 = 1.5 / 2 = 0.75
+        # This means we are 75% of the way from row 2 toward row 4.
+        val_granular = sample_raw_bilinear(bayer_grid, row_base, col_base, -0.5, -0.5)
+
+        # Calculation:
+        # top_mix = 100 + 0.75 * (200 - 100) = 175
+        # bottom_mix = 300 + 0.75 * (400 - 300) = 375
+        # final = 175 + 0.75 * (375 - 175) = 325.0
+        assert np.isclose(val_granular, 325.0)
