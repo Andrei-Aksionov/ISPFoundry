@@ -251,7 +251,88 @@ def get_hann_window_2d(tile_size: int) -> np.ndarray:
     # The (pos + 0.5) ensures the window is centered on pixels
     w_1d = 0.5 * (1 - np.cos(2 * np.pi * (pos + 0.5) / tile_size))
     # Create 2D map via outer product
-    return np.outer(w_1d, w_1d)
+    return np.outer(w_1d, w_1d).astype(np.float32)
+
+
+@njit(fastmath=True)
+def sample_raw_bilinear(
+    raw_image: np.ndarray, row_base: int, col_base: int, row_offset: float, col_offset: float
+) -> np.float32:
+    """
+    Performs sub-pixel sampling on Bayer RAW data while preserving color integrity.
+
+    In a Bayer sensor, adjacent pixels are different colors (e.g., Red next to Green).
+    Standard bilinear interpolation would mix these colors, causing severe artifacts.
+    This function "jumps" with a 2-pixel stride to ensure it only interpolates
+    between pixels of the same color phase.
+
+    Sub-pixel Logic Examples:
+    -------------------------
+    - Shift = 0.4: Interpolates between phase 0 and phase 2.
+    - Shift = 1.0: Interpolates exactly 50/50 between phase 0 and phase 2.
+    - Shift = 1.8: Interpolates heavily toward phase 2.
+    - Shift = 2.0: Triggers the "Fast Path" and takes the pixel at index 2 directly.
+
+    Args:
+        raw_image: The 2D sensor data array (H, W).
+        row_base: The integer row index in the reference frame.
+        col_base: The integer column index in the reference frame.
+        row_offset: The vertical shift to apply (can be fractional).
+        col_offset: The horizontal shift to apply (can be fractional).
+
+    Returns:
+        np.float32: The color-accurate interpolated pixel value.
+
+    """
+
+    height, width = raw_image.shape
+
+    # 1. Fast Path: If the offset is exactly a multiple of 2, we are aligned
+    # perfectly with a Bayer pixel of the same color. We skip math to avoid blur.
+    r_off_int, c_off_int = round(row_offset), round(col_offset)
+    is_integer_shift = abs(row_offset - r_off_int) < 1e-5 and abs(col_offset - c_off_int) < 1e-5
+
+    if is_integer_shift and (r_off_int % 2 == 0) and (c_off_int % 2 == 0):
+        # Direct access to the same-color pixel
+        return np.float32(raw_image[row_base + r_off_int, col_base + c_off_int])
+
+    # 2. Identify the "sampling quad": the 4 nearest pixels of the same color.
+    # To keep the Bayer phase, we move in steps of 2 pixels.
+    # We find the top-left neighbor by flooring the offset to the nearest even number.
+    row_shift_base = int(np.floor(row_offset / 2.0) * 2)
+    col_shift_base = int(np.floor(col_offset / 2.0) * 2)
+
+    # Coordinates for the 2x2 same-color grid
+    row_top = row_base + row_shift_base
+    col_left = col_base + col_shift_base
+    row_bottom = row_top + 2
+    col_right = col_left + 2
+
+    # 3. Boundary Guard: If the 2-pixel stride goes off-sensor,
+    # we clamp to the base pixel to prevent crashes and maintain parity.
+    row_top = max(0, min(row_top, height - 1))
+    row_bottom = max(0, min(row_bottom, height - 1))
+    col_left = max(0, min(col_left, width - 1))
+    col_right = max(0, min(col_right, width - 1))
+
+    # 4. Calculate fractional distances [0.0, 1.0] within the 2-pixel gap.
+    # Example: if row_offset is 0.5, row_lerp is 0.25 (a quarter of the 2-pixel jump).
+    row_lerp = (row_offset - row_shift_base) / 2.0
+    col_lerp = (col_offset - col_shift_base) / 2.0
+
+    # 5. Fetch the 4 same-color neighbors
+    top_left = raw_image[row_top, col_left]
+    top_right = raw_image[row_top, col_right]
+    bottom_left = raw_image[row_bottom, col_left]
+    bottom_right = raw_image[row_bottom, col_right]
+
+    # 6. Bilinear Interpolation (Standard Lerp)
+    # Interpolate horizontally across the top and bottom pairs
+    top_mix = top_left + col_lerp * (top_right - top_left)
+    bottom_mix = bottom_left + col_lerp * (bottom_right - bottom_left)
+
+    # Interpolate vertically between the two horizontal results
+    return np.float32(top_mix + row_lerp * (bottom_mix - top_mix))
 
 
 # ----------------------------------------- Merging function -----------------------------------------
@@ -341,7 +422,7 @@ def find_best_offset(
 
             # Normalization: If tiles are partially off-image, a smaller area will naturally have a lower SAD.
             # Divide by area to find the true best match per pixel.
-            normalized_sad = (sad * inv_sigma) / (tile_size * tile_size)
+            normalized_sad = (sad * inv_sigma) / (rows * cols)
 
             if normalized_sad < min_sad:
                 min_sad = normalized_sad
@@ -413,7 +494,7 @@ def merge_tile(
     # In-place accumulation (ideal for Numba)
     for r in range(r_start, r_end):
         for c in range(c_start, c_end):
-            val = target_image[r + row_offset, c + col_offset]
+            val = sample_raw_bilinear(target_image, r, c, row_offset, col_offset)
             combined_weight = weight * blending_window[r - row_start, c - col_start]
             merged_accumulator[r, c] += val * combined_weight
             weights_accumulator[r, c] += combined_weight
@@ -459,8 +540,11 @@ def merge_images(
     if len({x.shape for x in burst_images}) != 1:
         raise ValueError("All images in the burst must have the same shape.")
 
-    if not all(metadata[0]["ExposureTime"] != mtd["ExposureTime"] for mtd in metadata[1:]):
-        logger.warning("The burst contains images with different exposures. Bracketing is not yet supported. ")
+    if not all(metadata[0]["ExposureTime"] == mtd["ExposureTime"] for mtd in metadata[1:]):
+        logger.warning(
+            "The burst contains images with different exposures: %s. Bracketing is not yet supported."
+            % [mtd["ExposureTime"] for mtd in metadata]
+        )
 
     # 1. Find the image with the highest sharpness
     sharpest_image_idx = find_sharpest_image_idx(burst_images, metadata)
