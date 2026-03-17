@@ -87,7 +87,7 @@ def find_sharpest_image_idx(images: list[np.ndarray], metadata: list[dict[str, A
 
     best_idx, best_score = max(enumerate(scores), key=lambda x: x[1])
     avg_score = sum(scores) / len(scores)
-    improvement = (best_score / avg_score - 1) * 100
+    improvement = (best_score / (avg_score + 1e-9) - 1) * 100
 
     logger.info(f"Lucky Imaging: Selected frame `{best_idx}` ({improvement:+.1f}% sharper than burst average)")
     return best_idx
@@ -251,10 +251,202 @@ def get_hann_window_2d(tile_size: int) -> np.ndarray:
     # The (pos + 0.5) ensures the window is centered on pixels
     w_1d = 0.5 * (1 - np.cos(2 * np.pi * (pos + 0.5) / tile_size))
     # Create 2D map via outer product
-    return np.outer(w_1d, w_1d)
+    return np.outer(w_1d, w_1d).astype(np.float32)
 
 
-# ----------------------------------------- Merging function -----------------------------------------
+@njit(fastmath=True)
+def find_subpixel_shift(grid: np.ndarray) -> tuple[float, float]:
+    """
+    Finds the subpixel shift (delta_y, delta_x) by fitting 1D parabolas to a 3x3 score grid.
+
+    This function performs a "separable" quadratic fit. It treats the horizontal and
+    vertical axes independently, finding the vertex of the parabola formed by the
+    three points on each axis (e.g., [Up, Center, Down]).
+
+    The grid is expected to be a 3x3 array of alignment costs (e.g., VW-SAD):
+    [  _      Up      _   ]
+    [ Left  Center  Right ]
+    [  _     Down     _   ]
+
+    Args:
+        grid: 3x3 numpy array of alignment scores.
+
+    Returns:
+        (offset_row, offset_col): The fractional shift relative to the center pixel.
+        Values are clamped to the range [-0.5, 0.5].
+
+    """
+
+    # Extract values for readability
+    center = grid[1, 1]
+    left = grid[1, 0]
+    right = grid[1, 2]
+    up = grid[0, 1]
+    down = grid[2, 1]
+
+    # 1D Quadratic fit for each axis independently:
+    # Formula for offset = (f(x-1) - f(x+1)) / (2 * (f(x-1) + f(x+1) - 2*f(x)))
+
+    # Row (Vertical) offset
+    denom_row = 2 * (up + down - 2 * center)
+    offset_row = (up - down) / denom_row if abs(denom_row) > 1e-7 else 0.0
+
+    # Column (Horizontal) offset
+    denom_col = 2 * (left + right - 2 * center)
+    offset_col = (left - right) / denom_col if abs(denom_col) > 1e-7 else 0.0
+
+    # Robustness clamp: If the offset is > 0.5, the integer search likely
+    # landed on the wrong pixel. Clamping prevents inconsistent alignment.
+    offset_r = max(-0.5, min(0.5, offset_row))
+    offset_c = max(-0.5, min(0.5, offset_col))
+
+    return float(offset_r), float(offset_c)
+
+
+@njit(fastmath=True)
+def sample_raw_bilinear(
+    raw_image: np.ndarray, row_base: int, col_base: int, row_offset: float, col_offset: float
+) -> np.float32:
+    """
+    Performs sub-pixel sampling on Bayer RAW data while preserving color integrity.
+
+    In a Bayer sensor, adjacent pixels are different colors (e.g., Red next to Green).
+    Standard bilinear interpolation would mix these colors, causing severe artifacts.
+    This function "jumps" with a 2-pixel stride to ensure it only interpolates
+    between pixels of the same color phase.
+
+    Sub-pixel Logic Examples:
+    -------------------------
+    - Shift = 0.4: Interpolates between phase 0 and phase 2.
+    - Shift = 1.0: Interpolates exactly 50/50 between phase 0 and phase 2.
+    - Shift = 1.8: Interpolates heavily toward phase 2.
+    - Shift = 2.0: Triggers the "Fast Path" and takes the pixel at index 2 directly.
+
+    Args:
+        raw_image: The 2D sensor data array (H, W).
+        row_base: The integer row index in the reference frame.
+        col_base: The integer column index in the reference frame.
+        row_offset: The vertical shift to apply (can be fractional).
+        col_offset: The horizontal shift to apply (can be fractional).
+
+    Returns:
+        np.float32: The color-accurate interpolated pixel value.
+
+    """
+
+    height, width = raw_image.shape
+
+    # 1. Fast Path: If the offset is exactly a multiple of 2, we are aligned
+    # perfectly with a Bayer pixel of the same color. We skip math to avoid blur.
+    r_off_int, c_off_int = round(row_offset), round(col_offset)
+    is_integer_shift = abs(row_offset - r_off_int) < 1e-5 and abs(col_offset - c_off_int) < 1e-5
+
+    if is_integer_shift and (r_off_int % 2 == 0) and (c_off_int % 2 == 0):
+        # Direct access to the same-color pixel
+        return np.float32(raw_image[row_base + r_off_int, col_base + c_off_int])
+
+    # 2. Identify the "sampling quad": the 4 nearest pixels of the same color.
+    # To keep the Bayer phase, we move in steps of 2 pixels.
+    # We find the top-left neighbor by flooring the offset to the nearest even number.
+    row_shift_base = int(np.floor(row_offset / 2.0) * 2)
+    col_shift_base = int(np.floor(col_offset / 2.0) * 2)
+
+    # Coordinates for the 2x2 same-color grid
+    row_top = row_base + row_shift_base
+    col_left = col_base + col_shift_base
+    # Stay in bounds while maintaining Bayer phase
+    row_bottom = row_top + 2 if row_top + 2 < height else row_top
+    col_right = col_left + 2 if col_left + 2 < width else col_left
+
+    # 3. Boundary Guard: If the 2-pixel stride goes off-sensor,
+    # we clamp to the base pixel to prevent crashes and maintain parity.
+    row_top = max(0, min(row_top, height - 1))
+    row_bottom = max(0, min(row_bottom, height - 1))
+
+    # 4. Calculate fractional distances [0.0, 1.0] within the 2-pixel gap.
+    # Example: if row_offset is 0.5, row_lerp is 0.25 (a quarter of the 2-pixel jump).
+    row_lerp = (row_offset - row_shift_base) / 2.0
+    col_lerp = (col_offset - col_shift_base) / 2.0
+
+    # 5. Fetch the 4 same-color neighbors
+    top_left = raw_image[row_top, col_left]
+    top_right = raw_image[row_top, col_right]
+    bottom_left = raw_image[row_bottom, col_left]
+    bottom_right = raw_image[row_bottom, col_right]
+
+    # 6. Bilinear Interpolation (Standard Lerp)
+    # Interpolate horizontally across the top and bottom pairs
+    top_mix = top_left + col_lerp * (top_right - top_left)
+    bottom_mix = bottom_left + col_lerp * (bottom_right - bottom_left)
+
+    # Interpolate vertically between the two horizontal results
+    return np.float32(top_mix + row_lerp * (bottom_mix - top_mix))
+
+
+@njit(fastmath=True)
+def _compute_tile_sad(
+    row_offset: int,
+    col_offset: int,
+    reference_proxy: np.ndarray,
+    target_proxy: np.ndarray,
+    row_start: int,
+    col_start: int,
+    tile_size: int,
+    inv_sigma: float,
+) -> float | None:
+    """
+    Computes the area-normalized, Variance-Weighted Sum of Absolute Differences (VW-SAD).
+
+    This helper handles the spatial translation between frames and clips the
+    calculation to the valid intersection of the tile and the image boundaries.
+
+    Args:
+        row_offset: Integer vertical shift to apply to the target frame.
+        col_offset: Integer horizontal shift to apply to the target frame.
+        reference_proxy: Grayscale luma proxy of the reference frame.
+        target_proxy: Grayscale luma proxy of the frame being aligned.
+        row_start: Top-most coordinate of the tile in the reference frame.
+        col_start: Left-most coordinate of the tile in the reference frame.
+        tile_size: Size (width/height) of the square tile.
+        inv_sigma: Pre-calculated inverse noise floor (1/sigma) for normalization.
+
+    Returns:
+        float: The normalized SAD score. A value of ~1.0 indicates differences
+               consistent with the expected noise floor.
+
+    """
+
+    height, width = reference_proxy.shape
+
+    # Calculate the intersection of the Target Tile (Ref + offset) and the Target Image
+    # These must be clipped so we don't index out of bounds
+    r_start = max(row_start, -row_offset, 0)
+    r_end = min(row_start + tile_size, height - row_offset, height)
+    c_start = max(col_start, -col_offset, 0)
+    c_end = min(col_start + tile_size, width - col_offset, width)
+
+    if r_start >= r_end or c_start >= c_end:
+        return None
+
+    # Slicing: The target slice must be offset by `dy` and `dx` because it is the 'shifted' version of the reference
+    ref_view = reference_proxy[r_start:r_end, c_start:c_end]
+    tgt_view = target_proxy[r_start + row_offset : r_end + row_offset, c_start + col_offset : c_end + col_offset]
+
+    # Width Numba per-pixel calculation is faster
+    # np.sum(np.abs(...)) leads to temporary array allocations
+    sad = 0.0
+    rows, cols = ref_view.shape
+    for r in range(rows):
+        for c in range(cols):
+            # Direct subtraction and absolute value
+            sad += abs(ref_view[r, c] - tgt_view[r, c])
+
+    # Normalization: If tiles are partially off-image, a smaller area will naturally have a lower SAD.
+    # Divide by area to find the true best match per pixel.
+    return (sad * inv_sigma) / (rows * cols)
+
+
+# ----------------------------------------- Merging functions -----------------------------------------
 
 
 @njit(fastmath=True)
@@ -267,7 +459,7 @@ def find_best_offset(
     max_offset: int,
     noise_scales: np.ndarray,
     noise_offsets: np.ndarray,
-) -> tuple[int, int, float]:
+) -> tuple[float, float, float]:
     """
     Finds the integer translation (dy, dx) using Variance-Weighted SAD (VW-SAD).
 
@@ -289,7 +481,11 @@ def find_best_offset(
 
     """
 
-    # 1. Calculate the noise floor for this tile
+    height, width = reference_proxy.shape
+
+    # --- 1. Noise Floor & Normalization Setup ---
+
+    # Calculate the noise floor for this tile
     ref_tile = reference_proxy[row_start : row_start + tile_size, col_start : col_start + tile_size]
     tile_mean = np.mean(ref_tile)
 
@@ -309,46 +505,58 @@ def find_best_offset(
     sigma_sq = max(1e-9, 2.0 * (avg_scale * tile_mean + avg_offset)) * proxy_variance_scale
     inv_sigma = 1.0 / (np.sqrt(sigma_sq) + 1e-8)
 
-    height, width = reference_proxy.shape
+    # --- 2. Pass 1: Global Integer Search ---
+
     min_sad = 1e20
-    best_dy, best_dx = 0, 0
+    best_dy_int, best_dx_int = 0, 0
 
     for dy in range(-max_offset, max_offset + 1):
         for dx in range(-max_offset, max_offset + 1):
-            # Calculate the intersection of the Target Tile (Ref + offset) and the Target Image
-            # These must be clipped so we don't index out of bounds
-            r_start = max(row_start, -dy, 0)
-            r_end = min(row_start + tile_size, height - dy, height)
+            sad = _compute_tile_sad(dy, dx, reference_proxy, target_proxy, row_start, col_start, tile_size, inv_sigma)
+            sad = 1e20 if (sad is None) else sad
+            if sad < min_sad:
+                min_sad = sad
+                best_dy_int = dy
+                best_dx_int = dx
 
-            c_start = max(col_start, -dx, 0)
-            c_end = min(col_start + tile_size, width - dx, width)
+    # --- 3. Pass 2: Sub-pixel Refinement within 3x3 neighborhood ---
 
-            if r_start >= r_end or c_start >= c_end:
-                continue
+    # Populate a 3x3 grid centered on (best_dy_int, best_dx_int)
+    neighborhood = np.zeros((3, 3), dtype=np.float32)
+    neighborhood[1, 1] = min_sad
 
-            # Slicing: The target slice must be offset by `dy` and `dx` because it is the 'shifted' version of the reference
-            ref_view = reference_proxy[r_start:r_end, c_start:c_end]
-            tgt_view = target_proxy[r_start + dy : r_end + dy, c_start + dx : c_end + dx]
+    # Define the "Cross" relative offsets
+    # Directions: Up (N), Down (S), Left (W), Right (E)
+    cross_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1)]
 
-            # Width Numba per-pixel calculation is faster
-            # np.sum(np.abs(...)) leads to temporary array allocations
-            sad = 0.0
-            rows, cols = ref_view.shape
-            for r in range(rows):
-                for c in range(cols):
-                    # Direct subtraction and absolute value
-                    sad += abs(ref_view[r, c] - tgt_view[r, c])
+    for offset_row, offset_col in cross_offsets:
+        dy, dx = best_dy_int + offset_row, best_dx_int + offset_col
+        sad = _compute_tile_sad(dy, dx, reference_proxy, target_proxy, row_start, col_start, tile_size, inv_sigma)
+        # If neighbor is off-screen - mark it as "Pending" by assigning -1.
+        # It will be fixed after the loop (using the opposite neighbor).
+        sad = -1 if (sad is None) else sad
+        neighborhood[offset_row + 1, offset_col + 1] = sad
 
-            # Normalization: If tiles are partially off-image, a smaller area will naturally have a lower SAD.
-            # Divide by area to find the true best match per pixel.
-            normalized_sad = (sad * inv_sigma) / (tile_size * tile_size)
+    # --- 4. Fill Missing Neighbors (Symmetric Fallback) ---
 
-            if normalized_sad < min_sad:
-                min_sad = normalized_sad
-                best_dy = dy
-                best_dx = dx
+    for i, j in cross_offsets:
+        row_idx, col_idx = i + 1, j + 1
+        if neighborhood[row_idx, col_idx] < 0:
+            # Find the opposite neighbor's value
+            # Indices: North[0,1] <-> South[2,1], West[1,0] <-> East[1,2]
+            opp_val = neighborhood[1 - i, 1 - j]
+            # If opp_val is -1.0, max(opp_val, min_sad) returns min_sad
+            # Otherwise, it returns the valid opposite neighbor score
+            neighborhood[row_idx, col_idx] = max(opp_val, min_sad)
 
-    return best_dy, best_dx, min_sad
+    # --- 5. Quadratic Surface Fitting ---
+
+    sub_dy, sub_dx = find_subpixel_shift(neighborhood)
+    # Final coordinates combine integer search + fractional refinement
+    best_dy_float = float(best_dy_int) + sub_dy
+    best_dx_float = float(best_dx_int) + sub_dx
+
+    return best_dy_float, best_dx_float, min_sad
 
 
 @njit(fastmath=True)
@@ -358,8 +566,8 @@ def merge_tile(
     target_image: np.ndarray,
     row_start: int,
     col_start: int,
-    row_offset: int,
-    col_offset: int,
+    row_offset: float,
+    col_offset: float,
     sad_score: float,
     tile_size: int,
     blending_window: np.ndarray,
@@ -396,24 +604,29 @@ def merge_tile(
 
     height, width = merged_accumulator.shape
 
-    # Calculate weight: L1 (Laplacian) or L2 (Gaussian)
+    # 1. Calculate the Kernel Weight (Rejection vs. Averaging)
     weight = np.exp(-(sad_score**2) / k**2) if use_l2_kernel else np.exp(-sad_score / k)
     if weight < 1e-4:
         return
 
-    # Boundary-safe ref and target tiles intersection
-    r_start = max(row_start, -row_offset, 0)
-    r_end = min(row_start + tile_size, height - row_offset, height)
-    c_start = max(col_start, -col_offset, 0)
-    c_end = min(col_start + tile_size, width - col_offset, width)
+    # 2. Boundary-safe intersection
+    # We must ensure that [r + row_offset] and [c + col_offset] stay within
+    # the target_image bounds. We add a 1-pixel margin for the bilinear interpolation.
+    r_start = max(row_start, np.ceil(-row_offset), 0)
+    r_end = min(row_start + tile_size, np.floor(height - row_offset - 1), height)
+
+    c_start = max(col_start, np.ceil(-col_offset), 0)
+    c_end = min(col_start + tile_size, np.floor(width - col_offset - 1), width)
 
     if r_start >= r_end or c_start >= c_end:
         return
 
-    # In-place accumulation (ideal for Numba)
+    # 3. Accumulation Loop
     for r in range(r_start, r_end):
         for c in range(c_start, c_end):
-            val = target_image[r + row_offset, c + col_offset]
+            # subpixel sampling from the target image
+            val = sample_raw_bilinear(target_image, r, c, row_offset, col_offset)
+            # Combine the kernel weight (temporal) with the Hann window (spatial)
             combined_weight = weight * blending_window[r - row_start, c - col_start]
             merged_accumulator[r, c] += val * combined_weight
             weights_accumulator[r, c] += combined_weight
@@ -459,8 +672,11 @@ def merge_images(
     if len({x.shape for x in burst_images}) != 1:
         raise ValueError("All images in the burst must have the same shape.")
 
-    if not all(metadata[0]["ExposureTime"] != mtd["ExposureTime"] for mtd in metadata[1:]):
-        logger.warning("The burst contains images with different exposures. Bracketing is not yet supported. ")
+    if not all(metadata[0]["ExposureTime"] == mtd["ExposureTime"] for mtd in metadata[1:]):
+        logger.warning(
+            "The burst contains images with different exposures: %s. Bracketing is not yet supported."
+            % [mtd["ExposureTime"] for mtd in metadata]
+        )
 
     # 1. Find the image with the highest sharpness
     sharpest_image_idx = find_sharpest_image_idx(burst_images, metadata)

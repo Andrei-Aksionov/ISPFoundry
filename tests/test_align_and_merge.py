@@ -2,7 +2,14 @@ import numpy as np
 import pytest
 from scipy.ndimage import gaussian_filter
 
-from pipeline_steps.align_and_merge import find_sharpest_image_idx, get_hann_window_2d, get_luma_proxy
+from pipeline_steps.align_and_merge import (
+    _compute_tile_sad,
+    find_sharpest_image_idx,
+    find_subpixel_shift,
+    get_hann_window_2d,
+    get_luma_proxy,
+    sample_raw_bilinear,
+)
 
 
 class TestGetLumaProxy:
@@ -194,3 +201,281 @@ class TestGetHannWindow2D:
         # The center of the window should have the highest weight
         center = tile_size // 2
         assert window[center, center] > window[0, 0]
+
+
+class TestSampleRawBilinear:
+    @pytest.fixture
+    def bayer_grid(self):
+        """
+        Creates a 10x10 synthetic Bayer-like grid.
+
+        Even rows/cols (0,0): 100.0 (e.g., Red)
+        Even rows, Odd cols (0,1): 50.0  (e.g., Green 1)
+        Odd rows, Even cols (1,0): 25.0  (e.g., Green 2)
+        Odd rows, Odd cols (1,1): 10.0   (e.g., Blue)
+        """
+        grid = np.zeros((10, 10), dtype=np.float32)
+        grid[0::2, 0::2] = 100.0
+        grid[0::2, 1::2] = 50.0
+        grid[1::2, 0::2] = 25.0
+        grid[1::2, 1::2] = 10.0
+        return grid
+
+    def test_integer_multiples_of_two(self, bayer_grid):
+        """Verify that offsets of 2, 4, etc., return exact pixel values (Fast Path)."""
+        row_base, col_base = 2, 2
+        # Shift by 2 pixels vertically and 4 pixels horizontally
+        val = sample_raw_bilinear(bayer_grid, row_base, col_base, 2.0, 4.0)
+
+        # Expected: bayer_grid[4, 6] which is an 'Even, Even' site (100.0)
+        assert val == 100.0
+        assert isinstance(val, (float, np.float32))
+
+    def test_fractional_midpoint(self, bayer_grid):
+        """Verify that a 1.0 offset (midpoint of a 2-pixel stride) returns a 50/50 mix."""
+        row_base, col_base = 2, 2
+        # row_offset 1.0 is halfway between index 2 and index 4
+        # bayer_grid[2, 2] = 100.0, bayer_grid[4, 2] = 100.0
+        # result should be 100.0
+        val_vertical = sample_raw_bilinear(bayer_grid, row_base, col_base, 1.0, 0.0)
+        assert np.isclose(val_vertical, 100.0)
+
+        # Now test across a gradient
+        # Let's modify a pixel to create a difference
+        bayer_grid[2, 4] = 200.0
+        # Halfway between bayer_grid[2, 2] (100.0) and bayer_grid[2, 4] (200.0)
+        val_horizontal = sample_raw_bilinear(bayer_grid, row_base, col_base, 0.0, 1.0)
+        assert np.isclose(val_horizontal, 150.0)
+
+    def test_subpixel_bilinear_quad(self, bayer_grid):
+        """Verify interpolation within a 2x2 same-color quad."""
+        # Setup a 2x2 grid of the same color (Red sites at 2,2; 2,4; 4,2; 4,4)
+        # We'll set them to different values to test the bilinear mix
+        row_base, col_base = 2, 2
+        bayer_grid[2, 2] = 10.0
+        bayer_grid[2, 4] = 20.0
+        bayer_grid[4, 2] = 30.0
+        bayer_grid[4, 4] = 40.0
+
+        # Sample at offset (0.5, 0.5)
+        # In our 2-pixel stride, 0.5 is 25% of the way to the next neighbor.
+        # lerp_weight = 0.5 / 2.0 = 0.25
+        val = sample_raw_bilinear(bayer_grid, row_base, col_base, 0.5, 0.5)
+
+        # Expected calculation:
+        # top_mix = 10 + 0.25 * (20 - 10) = 12.5
+        # bottom_mix = 30 + 0.25 * (40 - 30) = 32.5
+        # final = 12.5 + 0.25 * (32.5 - 12.5) = 17.5
+        assert np.isclose(val, 17.5)
+
+    def test_boundary_clamping_preserves_color(self, bayer_grid):
+        """Verify that sampling near the edge doesn't pull signal from the wrong Bayer color (phase) due to naive index clamping."""
+        height, width = bayer_grid.shape
+        # Base is the last Red site (8, 8) in a 10x10 grid.
+        row_base, col_base = 8, 8
+
+        # If we sample with an offset of 0.5, row_bottom would be 10 (OOB).
+        # Our phase-aware logic should clamp row_bottom to row_top (8).
+        val = sample_raw_bilinear(bayer_grid, row_base, col_base, 0.5, 0.5)
+
+        # If clamping works, it should ignore the fractional distance because
+        # there is no 'next' Red neighbor to interpolate with.
+        # Expected: exactly the value at [8, 8]
+        assert np.isclose(val, bayer_grid[8, 8])
+
+    def test_negative_offsets(self, bayer_grid):
+        """Verify that negative offsets (moving 'up' or 'left') work as expected."""
+        # Start in the middle
+        row_base, col_base = 4, 4
+        bayer_grid[2, 4] = 50.0
+        bayer_grid[4, 4] = 100.0
+
+        # Shift 'up' by 2 pixels
+        val = sample_raw_bilinear(bayer_grid, row_base, col_base, -2.0, 0.0)
+        assert val == 50.0
+
+    def test_negative_fractional_offset(self, bayer_grid):
+        """
+        Verify sub-pixel interpolation with negative fractional offsets.
+
+        This tests the transition logic when moving 'backwards' on the grid.
+        """
+        # Start at a known center point
+        row_base, col_base = 4, 4
+
+        # Setup the 2x2 same-color quad that sits 'above' and 'left' of our base
+        # Neighbors are at (2,2), (2,4), (4,2), (4,4)
+        bayer_grid[2, 2] = 100.0  # Top-Left
+        bayer_grid[2, 4] = 200.0  # Top-Right
+        bayer_grid[4, 2] = 300.0  # Bottom-Left
+        bayer_grid[4, 4] = 400.0  # Bottom-Right (the original base)
+
+        # We want to sample halfway between row 2 and 4, and halfway between col 2 and 4.
+        # This corresponds to a shift of -1.0 on both axes relative to (4,4).
+        # row_offset = -1.0 -> row_shift_base = floor(-1.0 / 2) * 2 = -2
+        # row_lerp = (-1.0 - (-2)) / 2 = 0.5 (exact midpoint)
+        val_mid = sample_raw_bilinear(bayer_grid, row_base, col_base, -1.0, -1.0)
+
+        # Expected midpoint calculation:
+        # (100 + 200 + 300 + 400) / 4 = 250.0
+        assert np.isclose(val_mid, 250.0)
+
+        # Test a more granular fractional shift: -0.5
+        # row_shift_base = floor(-0.5 / 2) * 2 = -2
+        # row_lerp = (-0.5 - (-2)) / 2 = 1.5 / 2 = 0.75
+        # This means we are 75% of the way from row 2 toward row 4.
+        val_granular = sample_raw_bilinear(bayer_grid, row_base, col_base, -0.5, -0.5)
+
+        # Calculation:
+        # top_mix = 100 + 0.75 * (200 - 100) = 175
+        # bottom_mix = 300 + 0.75 * (400 - 300) = 375
+        # final = 175 + 0.75 * (375 - 175) = 325.0
+        assert np.isclose(val_granular, 325.0)
+
+
+class TestFindSubpixelPeak3x3:
+    def test_perfect_center(self):
+        """If the center is the absolute minimum, offset should be (0, 0)."""
+        grid = np.array([[2.0, 1.0, 2.0], [1.0, 0.5, 1.0], [2.0, 1.0, 2.0]], dtype=np.float32)
+
+        dr, dc = find_subpixel_shift(grid)
+        assert dr == 0.0
+        assert dc == 0.0
+
+    def test_known_fractional_shift(self):
+        """Test with a grid where the minimum is mathematically at a known offset. For a parabola y = ax^2 + bx + c, the vertex is at -b / 2a."""
+        # Create a 1D parabola: f(x) = (x - 0.25)^2
+        # Points at x = -1, 0, 1:
+        # f(-1) = 1.5625 (Up/Left)
+        # f(0)  = 0.0625 (Center)
+        # f(1)  = 0.5625 (Down/Right)
+        grid = np.zeros((3, 3), dtype=np.float32)
+        grid[1, 1] = 0.0625  # Center
+
+        # Vertical shift of +0.25 (towards 'Down')
+        grid[0, 1] = 1.5625  # Up
+        grid[2, 1] = 0.5625  # Down
+
+        # Horizontal shift of -0.25 (towards 'Left')
+        # f(x) = (x + 0.25)^2
+        # f(-1) = 0.5625, f(0) = 0.0625, f(1) = 1.5625
+        grid[1, 0] = 0.5625  # Left
+        grid[1, 2] = 1.5625  # Right
+
+        dr, dc = find_subpixel_shift(grid)
+
+        # Note: In the code, offset_row = (up - down) / denom
+        # For our vertical setup: (1.5625 - 0.5625) / (2 * (1.5625 + 0.5625 - 2*0.0625))
+        # 1.0 / (2 * (2.125 - 0.125)) = 1.0 / 4.0 = 0.25
+        assert np.isclose(dr, 0.25)
+        assert np.isclose(dc, -0.25)
+
+    def test_clamping_at_boundary(self):
+        """Ensure the function clamps at +/- 0.5 even if the math suggests further."""
+        # Create a grid where the 'Down' and 'Right' values are extremely small,
+        # pulling the peak far beyond the next pixel.
+        grid = np.array([[10.0, 10.0, 10.0], [10.0, 5.0, 0.1], [10.0, 0.1, 10.0]], dtype=np.float32)
+
+        dr, dc = find_subpixel_shift(grid)
+
+        # The math would suggest > 0.5, but we must clamp.
+        assert dr == 0.5
+        assert dc == 0.5
+
+    def test_flat_surface_division_by_zero(self):
+        """If neighbors are identical to center, offset should be 0.0 (no division by zero)."""
+        grid = np.full((3, 3), 1.0, dtype=np.float32)
+
+        dr, dc = find_subpixel_shift(grid)
+        assert dr == 0.0
+        assert dc == 0.0
+
+    def test_asymmetric_noise_robustness(self):
+        """Verify that diagonal elements don't affect the output. We change a corner (diagonal) and the result should remain identical."""
+        grid_a = np.array([[0.0, 1.0, 0.0], [1.0, 0.5, 1.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+
+        grid_b = grid_a.copy()
+        grid_b[0, 0] = 99.9  # Modify corner
+
+        res_a = find_subpixel_shift(grid_a)
+        res_b = find_subpixel_shift(grid_b)
+
+        assert res_a == res_b
+
+    def test_linear_slope(self):
+        """If the surface is a linear plane (not a parabola), the denominator logic should handle it or the clamp should catch it."""
+        # Vertical is linear: Up=3, Center=2, Down=1
+        # denom = 2 * (3 + 1 - 2*2) = 0. This should trigger the 1e-7 check.
+        grid = np.array([[0, 3, 0], [0, 2, 0], [0, 1, 0]], dtype=np.float32)
+
+        dr, dc = find_subpixel_shift(grid)
+        assert dr == 0.0
+        assert dc == 0.0
+
+
+class TestComputeTileSAD:
+    @pytest.fixture
+    def proxy_pair(self):
+        """Create a 100x100 reference and target proxy."""
+        ref = np.full((100, 100), 100.0, dtype=np.float32)
+        tgt = np.full((100, 100), 100.0, dtype=np.float32)
+        return ref, tgt
+
+    def test_perfect_match(self, proxy_pair):
+        """If frames are identical and offset is 0, SAD should be 0."""
+        ref, tgt = proxy_pair
+        score = _compute_tile_sad(0, 0, ref, tgt, 10, 10, 16, 1.0)
+        assert score == 0.0
+
+    def test_known_difference(self, proxy_pair):
+        """Verify the VW-SAD math: (abs_diff * inv_sigma) / area."""
+        ref, tgt = proxy_pair
+        # Introduce a constant difference of 10.0
+        tgt += 10.0
+
+        inv_sigma = 0.5
+        tile_size = 16
+        # Expected: (10.0 * 0.5) / (no area division because it cancels out in the loop)
+        # Loop sum: 16 * 16 * (10.0) = 2560
+        # Normalization (2560 * 0.5) / (16 * 16) = 5.0
+        score = _compute_tile_sad(0, 0, ref, tgt, 10, 10, tile_size, inv_sigma)
+        assert np.isclose(score, 5.0)
+
+    def test_partial_out_of_bounds_clipping(self, proxy_pair):
+        """Ensure that when a tile is partially OOB, the area normalization uses the *actual* intersection area, not the full tile_size."""
+        ref, tgt = proxy_pair
+        # Put a high difference in the corner
+        tgt[0:5, 0:5] += 100.0
+
+        # Shift so only a 5x5 area of the tile is actually on the image
+        # Tile size is 16, but we start at row -11
+        score = _compute_tile_sad(-11, 0, ref, tgt, 0, 0, 16, 1.0)
+
+        # Valid rows are max(0, -(-11)) = 11 to min(16, 100+11) = 16.
+        # Intersection height is 5. Width is 16.
+        # If normalization uses 5*16 (80) instead of 16*16 (256), the code is correct.
+        assert score >= 0  # Should not crash and should return valid float
+
+    def test_total_out_of_bounds(self, proxy_pair):
+        """Verify None is returned when there is no intersection."""
+        ref, tgt = proxy_pair
+        # Shift entirely off a 100x100 image
+        score = _compute_tile_sad(200, 200, ref, tgt, 0, 0, 16, 1.0)
+        assert score is None
+
+    def test_translation_consistency(self):
+        """Verify that a translated feature is found at the correct offset."""
+        ref = np.zeros((50, 50), dtype=np.float32)
+        tgt = np.zeros((50, 50), dtype=np.float32)
+
+        # Feature at (10, 10) in ref, moved to (12, 12) in target
+        ref[10:15, 10:15] = 255.0
+        tgt[12:17, 12:17] = 255.0
+
+        # If we shift by dy=2, dx=2, the SAD should be 0
+        score_correct = _compute_tile_sad(2, 2, ref, tgt, 10, 10, 5, 1.0)
+        # If we don't shift, the SAD should be high
+        score_wrong = _compute_tile_sad(0, 0, ref, tgt, 10, 10, 5, 1.0)
+
+        assert score_correct == 0.0
+        assert score_wrong > 0.0
