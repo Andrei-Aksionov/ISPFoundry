@@ -87,7 +87,7 @@ def find_sharpest_image_idx(images: list[np.ndarray], metadata: list[dict[str, A
 
     best_idx, best_score = max(enumerate(scores), key=lambda x: x[1])
     avg_score = sum(scores) / len(scores)
-    improvement = (best_score / (avg_score - 1 + 1e-9)) * 100
+    improvement = (best_score / (avg_score + 1e-9) - 1) * 100
 
     logger.info(f"Lucky Imaging: Selected frame `{best_idx}` ({improvement:+.1f}% sharper than burst average)")
     return best_idx
@@ -255,6 +255,48 @@ def get_hann_window_2d(tile_size: int) -> np.ndarray:
 
 
 @njit(fastmath=True)
+def find_subpixel_peak_3x3(grid: np.ndarray) -> tuple[float, float]:
+    """
+    Fits a 2D quadratic surface to a 3x3 grid of alignment scores to find the subpixel peak/minimum.
+
+    The grid represents:
+    [ (r-1, c-1), (r-1, c), (r-1, c+1) ]
+    [ (r, c-1),   (r, c),   (r, c+1)   ]
+    [ (r+1, c-1), (r+1, c), (r+1, c+1) ]
+
+    Returns:
+        (row_offset, col_offset): Shifts relative to the center pixel (0,0).
+        Range is typically [-0.5, 0.5].
+
+    """
+    # Extract values for readability
+    c = grid[1, 1]  # center
+    w = grid[1, 0]  # west
+    e = grid[1, 2]  # east
+    n = grid[0, 1]  # north
+    s = grid[2, 1]  # south
+
+    # 1D Quadratic fit for each axis independently:
+    # offset vertical = (Neighbor Up - Neighbor Down) / (2 * (Neighbor Up + Neighbor Down - 2 * Center))
+    # offset horizontal = (Neighbor Left - Neighbor Right) / (2 * (Neighbor Left + Neighbor Right - 2 * Center))
+
+    # Row (Vertical) offset
+    denom_r = 2.0 * (n + s - 2.0 * c)
+    offset_r = (n - s) / denom_r if abs(denom_r) > 1e-07 else 0.0
+
+    # Column (Horizontal) offset
+    denom_c = 2.0 * (w + e - 2.0 * c)
+    offset_c = (w - e) / denom_c if abs(denom_c) > 1e-07 else 0.0
+
+    # Robustness clamp: Subpixel shifts should not move the peak more than
+    # half a pixel, otherwise the integer alignment was likely wrong.
+    offset_r = max(-0.5, min(0.5, offset_r))
+    offset_c = max(-0.5, min(0.5, offset_c))
+
+    return float(offset_r), float(offset_c)
+
+
+@njit(fastmath=True)
 def sample_raw_bilinear(
     raw_image: np.ndarray, row_base: int, col_base: int, row_offset: float, col_offset: float
 ) -> np.float32:
@@ -347,7 +389,7 @@ def find_best_offset(
     max_offset: int,
     noise_scales: np.ndarray,
     noise_offsets: np.ndarray,
-) -> tuple[int, int, float]:
+) -> tuple[float, float, float]:
     """
     Finds the integer translation (dy, dx) using Variance-Weighted SAD (VW-SAD).
 
@@ -369,7 +411,11 @@ def find_best_offset(
 
     """
 
-    # 1. Calculate the noise floor for this tile
+    height, width = reference_proxy.shape
+
+    # --- 1. Noise Floor & Normalization Setup ---
+
+    # Calculate the noise floor for this tile
     ref_tile = reference_proxy[row_start : row_start + tile_size, col_start : col_start + tile_size]
     tile_mean = np.mean(ref_tile)
 
@@ -389,12 +435,14 @@ def find_best_offset(
     sigma_sq = max(1e-9, 2.0 * (avg_scale * tile_mean + avg_offset)) * proxy_variance_scale
     inv_sigma = 1.0 / (np.sqrt(sigma_sq) + 1e-8)
 
-    height, width = reference_proxy.shape
+    # --- 2. Pass 1: Global Integer Search ---
+
     min_sad = 1e20
-    best_dy, best_dx = 0, 0
+    best_dy_int, best_dx_int = 0, 0
 
     for dy in range(-max_offset, max_offset + 1):
         for dx in range(-max_offset, max_offset + 1):
+            # TODO (andrei aksionau): the code below should be moved into a separate function
             # Calculate the intersection of the Target Tile (Ref + offset) and the Target Image
             # These must be clipped so we don't index out of bounds
             r_start = max(row_start, -dy, 0)
@@ -425,10 +473,69 @@ def find_best_offset(
 
             if normalized_sad < min_sad:
                 min_sad = normalized_sad
-                best_dy = dy
-                best_dx = dx
+                best_dy_int = dy
+                best_dx_int = dx
 
-    return best_dy, best_dx, min_sad
+    # --- 3. Pass 2: Build 3x3 Neighborhood for Sub-pixel Refinement ---
+
+    # Populate a 3x3 grid centered on (best_dy_int, best_dx_int)
+    neighborhood = np.zeros((3, 3), dtype=np.float32)
+    neighborhood[1, 1] = min_sad
+
+    # Define the "Cross" relative offsets
+    # Directions: Up (N), Down (S), Left (W), Right (E)
+    cross_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+
+    for i, j in cross_offsets:
+        dy, dx = best_dy_int + i, best_dx_int + j
+
+        # Bounds check for the neighborhood pixel
+        r_start = max(row_start, -dy, 0)
+        r_end = min(row_start + tile_size, height - dy, height)
+        c_start = max(col_start, -dx, 0)
+        c_end = min(col_start + tile_size, width - dx, width)
+
+        if r_start >= r_end or c_start >= c_end:
+            # NEIGHBOR IS OFF-SCREEN:
+            # We don't have this value, so we mark it as "Pending" (-1)
+            # and we will fix it after the loop using the opposite neighbor.
+            neighborhood[i + 1, j + 1] = -1
+            continue
+
+        sad = 0.0
+        rows, cols = r_end - r_start, c_end - c_start
+        ref_view = reference_proxy[r_start:r_end, c_start:c_end]
+        tgt_view = target_proxy[r_start + dy : r_end + dy, c_start + dx : c_end + dx]
+
+        for r in range(rows):
+            for c in range(cols):
+                sad += abs(ref_view[r, c] - tgt_view[r, c])
+
+        neighborhood[i + 1, j + 1] = (sad * inv_sigma) / (rows * cols)
+
+    # --- 4. Fill Missing Neighbors (Symmetric Fallback) ---
+
+    for i, j in cross_offsets:
+        row_idx, col_idx = i + 1, j + 1
+
+        if neighborhood[row_idx, col_idx] < 0:
+            # Find the opposite neighbor's value
+            # Indices: North[0,1] <-> South[2,1], West[1,0] <-> East[1,2]
+            opp_val = neighborhood[1 - i, 1 - j]
+
+            # If opp_val is -1.0, max(opp_val, min_sad) returns min_sad
+            # Otherwise, it returns the valid opposite neighbor score
+            neighborhood[row_idx, col_idx] = max(opp_val, min_sad)
+
+    # --- 5. Quadratic Surface Fitting ---
+
+    sub_dy, sub_dx = find_subpixel_peak_3x3(neighborhood)
+
+    # Final coordinates combine integer search + fractional refinement
+    best_dy_float = float(best_dy_int) + sub_dy
+    best_dx_float = float(best_dx_int) + sub_dx
+
+    return best_dy_float, best_dx_float, min_sad
 
 
 @njit(fastmath=True)
