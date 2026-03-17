@@ -383,6 +383,69 @@ def sample_raw_bilinear(
     return np.float32(top_mix + row_lerp * (bottom_mix - top_mix))
 
 
+@njit(fastmath=True)
+def _compute_tile_sad(
+    row_offset: int,
+    col_offset: int,
+    reference_proxy: np.ndarray,
+    target_proxy: np.ndarray,
+    row_start: int,
+    col_start: int,
+    tile_size: int,
+    inv_sigma: float,
+) -> float | None:
+    """
+    Computes the area-normalized, Variance-Weighted Sum of Absolute Differences (VW-SAD).
+
+    This helper handles the spatial translation between frames and clips the
+    calculation to the valid intersection of the tile and the image boundaries.
+
+    Args:
+        row_offset: Integer vertical shift to apply to the target frame.
+        col_offset: Integer horizontal shift to apply to the target frame.
+        reference_proxy: Grayscale luma proxy of the reference frame.
+        target_proxy: Grayscale luma proxy of the frame being aligned.
+        row_start: Top-most coordinate of the tile in the reference frame.
+        col_start: Left-most coordinate of the tile in the reference frame.
+        tile_size: Size (width/height) of the square tile.
+        inv_sigma: Pre-calculated inverse noise floor (1/sigma) for normalization.
+
+    Returns:
+        float: The normalized SAD score. A value of ~1.0 indicates differences
+               consistent with the expected noise floor.
+
+    """
+
+    height, width = reference_proxy.shape
+
+    # Calculate the intersection of the Target Tile (Ref + offset) and the Target Image
+    # These must be clipped so we don't index out of bounds
+    r_start = max(row_start, -row_offset, 0)
+    r_end = min(row_start + tile_size, height - row_offset, height)
+    c_start = max(col_start, -col_offset, 0)
+    c_end = min(col_start + tile_size, width - col_offset, width)
+
+    if r_start >= r_end or c_start >= c_end:
+        return None
+
+    # Slicing: The target slice must be offset by `dy` and `dx` because it is the 'shifted' version of the reference
+    ref_view = reference_proxy[r_start:r_end, c_start:c_end]
+    tgt_view = target_proxy[r_start + row_offset : r_end + row_offset, c_start + col_offset : c_end + col_offset]
+
+    # Width Numba per-pixel calculation is faster
+    # np.sum(np.abs(...)) leads to temporary array allocations
+    sad = 0.0
+    rows, cols = ref_view.shape
+    for r in range(rows):
+        for c in range(cols):
+            # Direct subtraction and absolute value
+            sad += abs(ref_view[r, c] - tgt_view[r, c])
+
+    # Normalization: If tiles are partially off-image, a smaller area will naturally have a lower SAD.
+    # Divide by area to find the true best match per pixel.
+    return (sad * inv_sigma) / (rows * cols)
+
+
 # ----------------------------------------- Merging functions -----------------------------------------
 
 
@@ -449,41 +512,14 @@ def find_best_offset(
 
     for dy in range(-max_offset, max_offset + 1):
         for dx in range(-max_offset, max_offset + 1):
-            # TODO (andrei aksionau): the code below should be moved into a separate function
-            # Calculate the intersection of the Target Tile (Ref + offset) and the Target Image
-            # These must be clipped so we don't index out of bounds
-            r_start = max(row_start, -dy, 0)
-            r_end = min(row_start + tile_size, height - dy, height)
-
-            c_start = max(col_start, -dx, 0)
-            c_end = min(col_start + tile_size, width - dx, width)
-
-            if r_start >= r_end or c_start >= c_end:
-                continue
-
-            # Slicing: The target slice must be offset by `dy` and `dx` because it is the 'shifted' version of the reference
-            ref_view = reference_proxy[r_start:r_end, c_start:c_end]
-            tgt_view = target_proxy[r_start + dy : r_end + dy, c_start + dx : c_end + dx]
-
-            # Width Numba per-pixel calculation is faster
-            # np.sum(np.abs(...)) leads to temporary array allocations
-            sad = 0.0
-            rows, cols = ref_view.shape
-            for r in range(rows):
-                for c in range(cols):
-                    # Direct subtraction and absolute value
-                    sad += abs(ref_view[r, c] - tgt_view[r, c])
-
-            # Normalization: If tiles are partially off-image, a smaller area will naturally have a lower SAD.
-            # Divide by area to find the true best match per pixel.
-            normalized_sad = (sad * inv_sigma) / (rows * cols)
-
-            if normalized_sad < min_sad:
-                min_sad = normalized_sad
+            sad = _compute_tile_sad(dy, dx, reference_proxy, target_proxy, row_start, col_start, tile_size, inv_sigma)
+            sad = 1e20 if (sad is None) else sad
+            if sad < min_sad:
+                min_sad = sad
                 best_dy_int = dy
                 best_dx_int = dx
 
-    # --- 3. Pass 2: Build 3x3 Neighborhood for Sub-pixel Refinement ---
+    # --- 3. Pass 2: Sub-pixel Refinement within 3x3 neighborhood ---
 
     # Populate a 3x3 grid centered on (best_dy_int, best_dx_int)
     neighborhood = np.zeros((3, 3), dtype=np.float32)
@@ -495,41 +531,20 @@ def find_best_offset(
 
     for offset_row, offset_col in cross_offsets:
         dy, dx = best_dy_int + offset_row, best_dx_int + offset_col
-
-        # Bounds check for the neighborhood pixel
-        r_start = max(row_start, -dy, 0)
-        r_end = min(row_start + tile_size, height - dy, height)
-        c_start = max(col_start, -dx, 0)
-        c_end = min(col_start + tile_size, width - dx, width)
-
-        if r_start >= r_end or c_start >= c_end:
-            # NEIGHBOR IS OFF-SCREEN:
-            # We don't have this value, so we mark it as "Pending" (-1)
-            # and it will be fixed after the loop (using the opposite neighbor).
-            neighborhood[offset_row + 1, offset_col + 1] = -1
-            continue
-
-        ref_view = reference_proxy[r_start:r_end, c_start:c_end]
-        tgt_view = target_proxy[r_start + dy : r_end + dy, c_start + dx : c_end + dx]
-
-        sad = 0.0
-        rows, cols = ref_view.shape
-        for r in range(rows):
-            for c in range(cols):
-                sad += abs(ref_view[r, c] - tgt_view[r, c])
-
-        neighborhood[offset_row + 1, offset_col + 1] = (sad * inv_sigma) / (rows * cols)
+        sad = _compute_tile_sad(dy, dx, reference_proxy, target_proxy, row_start, col_start, tile_size, inv_sigma)
+        # If neighbor is off-screen - mark it as "Pending" by assigning -1.
+        # It will be fixed after the loop (using the opposite neighbor).
+        sad = -1 if (sad is None) else sad
+        neighborhood[offset_row + 1, offset_col + 1] = sad
 
     # --- 4. Fill Missing Neighbors (Symmetric Fallback) ---
 
     for i, j in cross_offsets:
         row_idx, col_idx = i + 1, j + 1
-
         if neighborhood[row_idx, col_idx] < 0:
             # Find the opposite neighbor's value
             # Indices: North[0,1] <-> South[2,1], West[1,0] <-> East[1,2]
             opp_val = neighborhood[1 - i, 1 - j]
-
             # If opp_val is -1.0, max(opp_val, min_sad) returns min_sad
             # Otherwise, it returns the valid opposite neighbor score
             neighborhood[row_idx, col_idx] = max(opp_val, min_sad)
@@ -537,7 +552,6 @@ def find_best_offset(
     # --- 5. Quadratic Surface Fitting ---
 
     sub_dy, sub_dx = find_subpixel_shift(neighborhood)
-
     # Final coordinates combine integer search + fractional refinement
     best_dy_float = float(best_dy_int) + sub_dy
     best_dx_float = float(best_dx_int) + sub_dx
