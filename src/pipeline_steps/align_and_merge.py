@@ -254,44 +254,52 @@ def get_hann_window_2d(tile_size: int) -> np.ndarray:
     return np.outer(w_1d, w_1d).astype(np.float32)
 
 
+# TODO (andrei aksionau): add tests
 @njit(fastmath=True)
 def find_subpixel_peak_3x3(grid: np.ndarray) -> tuple[float, float]:
     """
-    Fits a 2D quadratic surface to a 3x3 grid of alignment scores to find the subpixel peak/minimum.
+    Finds the subpixel shift (delta_y, delta_x) by fitting 1D parabolas to a 3x3 score grid.
 
-    The grid represents:
-    [ (r-1, c-1), (r-1, c), (r-1, c+1) ]
-    [ (r, c-1),   (r, c),   (r, c+1)   ]
-    [ (r+1, c-1), (r+1, c), (r+1, c+1) ]
+    This function performs a "separable" quadratic fit. It treats the horizontal and
+    vertical axes independently, finding the vertex of the parabola formed by the
+    three points on each axis (e.g., [Up, Center, Down]).
+
+    The grid is expected to be a 3x3 array of alignment costs (e.g., VW-SAD):
+    [  _      Up      _   ]
+    [ Left  Center  Right ]
+    [  _     Down     _   ]
+
+    Args:
+        grid: 3x3 numpy array of alignment scores.
 
     Returns:
-        (row_offset, col_offset): Shifts relative to the center pixel (0,0).
-        Range is typically [-0.5, 0.5].
+        (offset_row, offset_col): The fractional shift relative to the center pixel.
+        Values are clamped to the range [-0.5, 0.5].
 
     """
+
     # Extract values for readability
-    c = grid[1, 1]  # center
-    w = grid[1, 0]  # west
-    e = grid[1, 2]  # east
-    n = grid[0, 1]  # north
-    s = grid[2, 1]  # south
+    center = grid[1, 1]
+    left = grid[1, 0]
+    right = grid[1, 2]
+    up = grid[0, 1]
+    down = grid[2, 1]
 
     # 1D Quadratic fit for each axis independently:
-    # offset vertical = (Neighbor Up - Neighbor Down) / (2 * (Neighbor Up + Neighbor Down - 2 * Center))
-    # offset horizontal = (Neighbor Left - Neighbor Right) / (2 * (Neighbor Left + Neighbor Right - 2 * Center))
+    # Formula for offset = (f(x-1) - f(x+1)) / (2 * (f(x-1) + f(x+1) - 2*f(x)))
 
     # Row (Vertical) offset
-    denom_r = 2.0 * (n + s - 2.0 * c)
-    offset_r = (n - s) / denom_r if abs(denom_r) > 1e-07 else 0.0
+    denom_row = 2 * (up + down - 2 * center)
+    offset_row = (up - down) / denom_row if abs(denom_row) > 1e-7 else 0.0
 
     # Column (Horizontal) offset
-    denom_c = 2.0 * (w + e - 2.0 * c)
-    offset_c = (w - e) / denom_c if abs(denom_c) > 1e-07 else 0.0
+    denom_col = 2 * (left + right - 2 * center)
+    offset_col = (left - right) / denom_col if abs(denom_col) > 1e-7 else 0.0
 
-    # Robustness clamp: Subpixel shifts should not move the peak more than
-    # half a pixel, otherwise the integer alignment was likely wrong.
-    offset_r = max(-0.5, min(0.5, offset_r))
-    offset_c = max(-0.5, min(0.5, offset_c))
+    # Robustness clamp: If the offset is > 0.5, the integer search likely
+    # landed on the wrong pixel. Clamping prevents inconsistent alignment.
+    offset_r = max(-0.5, min(0.5, offset_row))
+    offset_c = max(-0.5, min(0.5, offset_col))
 
     return float(offset_r), float(offset_c)
 
@@ -478,6 +486,7 @@ def find_best_offset(
 
     # --- 3. Pass 2: Build 3x3 Neighborhood for Sub-pixel Refinement ---
 
+    # TODO (andrei aksionau): review variable names
     # Populate a 3x3 grid centered on (best_dy_int, best_dx_int)
     neighborhood = np.zeros((3, 3), dtype=np.float32)
     neighborhood[1, 1] = min_sad
