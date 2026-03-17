@@ -566,8 +566,8 @@ def merge_tile(
     target_image: np.ndarray,
     row_start: int,
     col_start: int,
-    row_offset: int,
-    col_offset: int,
+    row_offset: float,
+    col_offset: float,
     sad_score: float,
     tile_size: int,
     blending_window: np.ndarray,
@@ -604,24 +604,29 @@ def merge_tile(
 
     height, width = merged_accumulator.shape
 
-    # Calculate weight: L1 (Laplacian) or L2 (Gaussian)
+    # 1. Calculate the Kernel Weight (Rejection vs. Averaging)
     weight = np.exp(-(sad_score**2) / k**2) if use_l2_kernel else np.exp(-sad_score / k)
     if weight < 1e-4:
         return
 
-    # Boundary-safe ref and target tiles intersection
-    r_start = max(row_start, -row_offset, 0)
-    r_end = min(row_start + tile_size, height - row_offset, height)
-    c_start = max(col_start, -col_offset, 0)
-    c_end = min(col_start + tile_size, width - col_offset, width)
+    # 2. Boundary-safe intersection
+    # We must ensure that [r + row_offset] and [c + col_offset] stay within
+    # the target_image bounds. We add a 1-pixel margin for the bilinear interpolation.
+    r_start = max(row_start, np.ceil(-row_offset), 0)
+    r_end = min(row_start + tile_size, np.floor(height - row_offset - 1), height)
+
+    c_start = max(col_start, np.ceil(-col_offset), 0)
+    c_end = min(col_start + tile_size, np.floor(width - col_offset - 1), width)
 
     if r_start >= r_end or c_start >= c_end:
         return
 
-    # In-place accumulation (ideal for Numba)
+    # 3. Accumulation Loop
     for r in range(r_start, r_end):
         for c in range(c_start, c_end):
+            # subpixel sampling from the target image
             val = sample_raw_bilinear(target_image, r, c, row_offset, col_offset)
+            # Combine the kernel weight (temporal) with the Hann window (spatial)
             combined_weight = weight * blending_window[r - row_start, c - col_start]
             merged_accumulator[r, c] += val * combined_weight
             weights_accumulator[r, c] += combined_weight
