@@ -383,7 +383,7 @@ def sample_raw_bilinear(
     return np.float32(top_mix + row_lerp * (bottom_mix - top_mix))
 
 
-# ----------------------------------------- Merging function -----------------------------------------
+# ----------------------------------------- Merging functions -----------------------------------------
 
 
 @njit(fastmath=True)
@@ -485,7 +485,6 @@ def find_best_offset(
 
     # --- 3. Pass 2: Build 3x3 Neighborhood for Sub-pixel Refinement ---
 
-    # TODO (andrei aksionau): review variable names
     # Populate a 3x3 grid centered on (best_dy_int, best_dx_int)
     neighborhood = np.zeros((3, 3), dtype=np.float32)
     neighborhood[1, 1] = min_sad
@@ -494,8 +493,8 @@ def find_best_offset(
     # Directions: Up (N), Down (S), Left (W), Right (E)
     cross_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1)]
 
-    for i, j in cross_offsets:
-        dy, dx = best_dy_int + i, best_dx_int + j
+    for offset_row, offset_col in cross_offsets:
+        dy, dx = best_dy_int + offset_row, best_dx_int + offset_col
 
         # Bounds check for the neighborhood pixel
         r_start = max(row_start, -dy, 0)
@@ -506,20 +505,20 @@ def find_best_offset(
         if r_start >= r_end or c_start >= c_end:
             # NEIGHBOR IS OFF-SCREEN:
             # We don't have this value, so we mark it as "Pending" (-1)
-            # and we will fix it after the loop using the opposite neighbor.
-            neighborhood[i + 1, j + 1] = -1
+            # and it will be fixed after the loop (using the opposite neighbor).
+            neighborhood[offset_row + 1, offset_col + 1] = -1
             continue
 
-        sad = 0.0
-        rows, cols = r_end - r_start, c_end - c_start
         ref_view = reference_proxy[r_start:r_end, c_start:c_end]
         tgt_view = target_proxy[r_start + dy : r_end + dy, c_start + dx : c_end + dx]
 
+        sad = 0.0
+        rows, cols = ref_view.shape
         for r in range(rows):
             for c in range(cols):
                 sad += abs(ref_view[r, c] - tgt_view[r, c])
 
-        neighborhood[i + 1, j + 1] = (sad * inv_sigma) / (rows * cols)
+        neighborhood[offset_row + 1, offset_col + 1] = (sad * inv_sigma) / (rows * cols)
 
     # --- 4. Fill Missing Neighbors (Symmetric Fallback) ---
 
