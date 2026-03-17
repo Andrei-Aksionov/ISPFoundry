@@ -254,9 +254,8 @@ def get_hann_window_2d(tile_size: int) -> np.ndarray:
     return np.outer(w_1d, w_1d).astype(np.float32)
 
 
-# TODO (andrei aksionau): add tests
 @njit(fastmath=True)
-def find_subpixel_peak_3x3(grid: np.ndarray) -> tuple[float, float]:
+def find_subpixel_shift(grid: np.ndarray) -> tuple[float, float]:
     """
     Finds the subpixel shift (delta_y, delta_x) by fitting 1D parabolas to a 3x3 score grid.
 
@@ -538,7 +537,7 @@ def find_best_offset(
 
     # --- 5. Quadratic Surface Fitting ---
 
-    sub_dy, sub_dx = find_subpixel_peak_3x3(neighborhood)
+    sub_dy, sub_dx = find_subpixel_shift(neighborhood)
 
     # Final coordinates combine integer search + fractional refinement
     best_dy_float = float(best_dy_int) + sub_dy

@@ -4,6 +4,7 @@ from scipy.ndimage import gaussian_filter
 
 from pipeline_steps.align_and_merge import (
     find_sharpest_image_idx,
+    find_subpixel_shift,
     get_hann_window_2d,
     get_luma_proxy,
     sample_raw_bilinear,
@@ -329,3 +330,83 @@ class TestSampleRawBilinear:
         # bottom_mix = 300 + 0.75 * (400 - 300) = 375
         # final = 175 + 0.75 * (375 - 175) = 325.0
         assert np.isclose(val_granular, 325.0)
+
+
+class TestFindSubpixelPeak3x3:
+    def test_perfect_center(self):
+        """If the center is the absolute minimum, offset should be (0, 0)."""
+        grid = np.array([[2.0, 1.0, 2.0], [1.0, 0.5, 1.0], [2.0, 1.0, 2.0]], dtype=np.float32)
+
+        dr, dc = find_subpixel_shift(grid)
+        assert dr == 0.0
+        assert dc == 0.0
+
+    def test_known_fractional_shift(self):
+        """Test with a grid where the minimum is mathematically at a known offset. For a parabola y = ax^2 + bx + c, the vertex is at -b / 2a."""
+        # Create a 1D parabola: f(x) = (x - 0.25)^2
+        # Points at x = -1, 0, 1:
+        # f(-1) = 1.5625 (Up/Left)
+        # f(0)  = 0.0625 (Center)
+        # f(1)  = 0.5625 (Down/Right)
+        grid = np.zeros((3, 3), dtype=np.float32)
+        grid[1, 1] = 0.0625  # Center
+
+        # Vertical shift of +0.25 (towards 'Down')
+        grid[0, 1] = 1.5625  # Up
+        grid[2, 1] = 0.5625  # Down
+
+        # Horizontal shift of -0.25 (towards 'Left')
+        # f(x) = (x + 0.25)^2
+        # f(-1) = 0.5625, f(0) = 0.0625, f(1) = 1.5625
+        grid[1, 0] = 0.5625  # Left
+        grid[1, 2] = 1.5625  # Right
+
+        dr, dc = find_subpixel_shift(grid)
+
+        # Note: In the code, offset_row = (up - down) / denom
+        # For our vertical setup: (1.5625 - 0.5625) / (2 * (1.5625 + 0.5625 - 2*0.0625))
+        # 1.0 / (2 * (2.125 - 0.125)) = 1.0 / 4.0 = 0.25
+        assert np.isclose(dr, 0.25)
+        assert np.isclose(dc, -0.25)
+
+    def test_clamping_at_boundary(self):
+        """Ensure the function clamps at +/- 0.5 even if the math suggests further."""
+        # Create a grid where the 'Down' and 'Right' values are extremely small,
+        # pulling the peak far beyond the next pixel.
+        grid = np.array([[10.0, 10.0, 10.0], [10.0, 5.0, 0.1], [10.0, 0.1, 10.0]], dtype=np.float32)
+
+        dr, dc = find_subpixel_shift(grid)
+
+        # The math would suggest > 0.5, but we must clamp.
+        assert dr == 0.5
+        assert dc == 0.5
+
+    def test_flat_surface_division_by_zero(self):
+        """If neighbors are identical to center, offset should be 0.0 (no division by zero)."""
+        grid = np.full((3, 3), 1.0, dtype=np.float32)
+
+        dr, dc = find_subpixel_shift(grid)
+        assert dr == 0.0
+        assert dc == 0.0
+
+    def test_asymmetric_noise_robustness(self):
+        """Verify that diagonal elements don't affect the output. We change a corner (diagonal) and the result should remain identical."""
+        grid_a = np.array([[0.0, 1.0, 0.0], [1.0, 0.5, 1.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+
+        grid_b = grid_a.copy()
+        grid_b[0, 0] = 99.9  # Modify corner
+
+        res_a = find_subpixel_shift(grid_a)
+        res_b = find_subpixel_shift(grid_b)
+
+        assert res_a == res_b
+
+    def test_linear_slope(self):
+        """If the surface is a linear plane (not a parabola), the denominator logic should handle it or the clamp should catch it."""
+        # Vertical is linear: Up=3, Center=2, Down=1
+        # denom = 2 * (3 + 1 - 2*2) = 0. This should trigger the 1e-7 check.
+        grid = np.array([[0, 3, 0], [0, 2, 0], [0, 1, 0]], dtype=np.float32)
+
+        dr, dc = find_subpixel_shift(grid)
+        assert dr == 0.0
+        assert dc == 0.0
