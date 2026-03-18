@@ -52,6 +52,13 @@ def get_luma_proxy(raw_image: np.ndarray, metadata: dict[str, Any]) -> np.ndarra
     return np.einsum("hiwj,ij->hw", quads, weights_map).astype(np.float32)
 
 
+def downsample_luma_proxy(proxy: np.ndarray) -> np.ndarray:
+    height, width = proxy.shape
+    height, width = height & ~1, width & ~1
+    proxy = proxy[:height, :width]
+    return proxy.reshape(height // 2, 2, width // 2, 2).mean(axis=(1, 3))
+
+
 def find_sharpest_image_idx(images: list[np.ndarray], metadata: list[dict[str, Any]]) -> int:
     """
     Identifies the sharpest frame in a burst to serve as the alignment base.
@@ -450,13 +457,42 @@ def _compute_tile_sad(
 
 
 @njit(fastmath=True)
-def find_best_offset(
+def find_best_integer_offset(
     reference_proxy: np.ndarray,
     target_proxy: np.ndarray,
     row_start: int,
     col_start: int,
     tile_size: int,
-    max_offset: int,
+    hint_dy: int,
+    hint_dx: int,
+    search_radius: int,
+    inv_sigma: float,
+) -> tuple[int, int, float]:
+
+    min_sad = 1e20
+    best_dy, best_dx = hint_dy, hint_dx
+
+    for dy in range(hint_dy - search_radius, hint_dy + search_radius + 1):
+        for dx in range(hint_dx - search_radius, hint_dx + search_radius + 1):
+            sad = _compute_tile_sad(dy, dx, reference_proxy, target_proxy, row_start, col_start, tile_size, inv_sigma)
+            sad = 1e20 if (sad is None) else sad
+            if sad < min_sad:
+                min_sad = sad
+                best_dy, best_dx = dy, dx
+
+    return best_dy, best_dx, min_sad
+
+
+@njit(fastmath=True)
+def find_best_offset_final(
+    reference_proxy: np.ndarray,
+    target_proxy: np.ndarray,
+    row_start: int,
+    col_start: int,
+    tile_size: int,
+    hint_dy: int,
+    hint_dx: int,
+    search_radius: int,
     noise_scales: np.ndarray,
     noise_offsets: np.ndarray,
 ) -> tuple[float, float, float]:
@@ -472,7 +508,7 @@ def find_best_offset(
         row_start: Top row index of the tile in the proxy coordinate system.
         col_start: Left column index of the tile in the proxy coordinate system.
         tile_size: The width/height of the tile in proxy pixels.
-        max_offset: The maximum pixels to search in any direction.
+        search_radius: The maximum pixels to search in any direction.
         noise_scales: 2x2 matrix of shot noises per-channel
         noise_offsets: 2x2 matrix of matrix read noise per-channel
 
@@ -480,8 +516,6 @@ def find_best_offset(
         A tuple of (best_dy, best_dx, minimum_sad).
 
     """
-
-    height, width = reference_proxy.shape
 
     # --- 1. Noise Floor & Normalization Setup ---
 
@@ -507,17 +541,17 @@ def find_best_offset(
 
     # --- 2. Pass 1: Global Integer Search ---
 
-    min_sad = 1e20
-    best_dy_int, best_dx_int = 0, 0
-
-    for dy in range(-max_offset, max_offset + 1):
-        for dx in range(-max_offset, max_offset + 1):
-            sad = _compute_tile_sad(dy, dx, reference_proxy, target_proxy, row_start, col_start, tile_size, inv_sigma)
-            sad = 1e20 if (sad is None) else sad
-            if sad < min_sad:
-                min_sad = sad
-                best_dy_int = dy
-                best_dx_int = dx
+    best_dy_int, best_dx_int, min_sad = find_best_integer_offset(
+        reference_proxy=reference_proxy,
+        target_proxy=target_proxy,
+        row_start=row_start,
+        col_start=col_start,
+        tile_size=tile_size,
+        hint_dy=hint_dy,
+        hint_dx=hint_dx,
+        search_radius=search_radius,
+        inv_sigma=inv_sigma,
+    )
 
     # --- 3. Pass 2: Sub-pixel Refinement within 3x3 neighborhood ---
 
@@ -557,6 +591,83 @@ def find_best_offset(
     best_dx_float = float(best_dx_int) + sub_dx
 
     return best_dy_float, best_dx_float, min_sad
+
+
+@njit(fastmath=True)
+def find_best_offset_pyramids(
+    reference_pyramids: list[np.ndarray],
+    target_pyramids: list[np.ndarray],
+    row_start: int,  # Coordinates at Level 0
+    col_start: int,
+    tile_size: int,
+    noise_scales: np.ndarray,
+    noise_offsets: np.ndarray,
+) -> tuple[float, float, float]:
+
+    # --- 1. Noise Floor & Normalization Setup ---
+
+    # Calculate the noise floor for this tile
+    ref_tile = reference_pyramids[0][row_start : row_start + tile_size, col_start : col_start + tile_size]
+    tile_mean = np.mean(ref_tile)
+
+    # Average noise parameters for the luma proxy
+    avg_scale = np.mean(noise_scales)
+    avg_offset = np.mean(noise_offsets)
+
+    # Statistical correction: Luma proxy averaging reduces variance by ~4x
+    # Must account for this so the SAD (from proxy) matches the Noise Model
+    # Since luma proxy weighs greens more, the actual value is
+    # 0.15**2 + 0.35**2 + 0.35**2 + 0.15**2 = 0.29
+    proxy_variance_scale = 0.29
+
+    # Variance of the difference: Var(Ref - Tgt) = Var(Ref) + Var(Tgt) ≈ 2 * Var(Ref)
+    # Assumes that Var(Reference) ≈ Var(Target)
+    # Given the NoiseProfile from the metadata, the noise model is: sigma^2 = g * x + c
+    sigma_sq = max(1e-9, 2.0 * (avg_scale * tile_mean + avg_offset)) * proxy_variance_scale
+    inv_sigma = 1.0 / (np.sqrt(sigma_sq) + 1e-8)
+
+    # 1. Coarsest Level (Level 2: 1/8 of RAW, 1/4 of Proxy)
+    # Search radius can be larger here to catch big movement
+    best_dy, best_dx, _ = find_best_integer_offset(
+        reference_proxy=reference_pyramids[2],
+        target_proxy=target_pyramids[2],
+        row_start=row_start // 4,
+        col_start=col_start // 4,
+        tile_size=tile_size,
+        hint_dy=0,
+        hint_dx=0,
+        search_radius=4,
+        inv_sigma=inv_sigma,
+    )
+
+    # 2. Middle Level (Level 1: 1/4 of RAW, 1/2 of Proxy)
+    # Refine within a tiny +/- 1 pixel window
+    best_dy, best_dx, _ = find_best_integer_offset(
+        reference_proxy=reference_pyramids[1],
+        target_proxy=target_pyramids[1],
+        row_start=row_start // 2,
+        col_start=col_start // 2,
+        tile_size=tile_size,
+        hint_dy=best_dy * 2,
+        hint_dx=best_dx * 2,
+        search_radius=1,
+        inv_sigma=inv_sigma,
+    )
+
+    # 3. Level 0 (1/2 of RAW) - Final Refinement
+    # Take the integer result and apply your existing sub-pixel logic
+    return find_best_offset_final(
+        reference_proxy=reference_pyramids[0],
+        target_proxy=target_pyramids[0],
+        row_start=row_start,
+        col_start=col_start,
+        tile_size=tile_size,
+        hint_dy=best_dy,
+        hint_dx=best_dx,
+        search_radius=1,
+        noise_scales=noise_scales,
+        noise_offsets=noise_offsets,
+    )
 
 
 @njit(fastmath=True)
@@ -612,11 +723,11 @@ def merge_tile(
     # 2. Boundary-safe intersection
     # We must ensure that [r + row_offset] and [c + col_offset] stay within
     # the target_image bounds. We add a 1-pixel margin for the bilinear interpolation.
-    r_start = max(row_start, np.ceil(-row_offset), 0)
-    r_end = min(row_start + tile_size, np.floor(height - row_offset - 1), height)
+    r_start = int(max(row_start, np.ceil(-row_offset), 0))
+    r_end = int(min(row_start + tile_size, np.floor(height - row_offset - 1), height))
 
-    c_start = max(col_start, np.ceil(-col_offset), 0)
-    c_end = min(col_start + tile_size, np.floor(width - col_offset - 1), width)
+    c_start = int(max(col_start, np.ceil(-col_offset), 0))
+    c_end = int(min(col_start + tile_size, np.floor(width - col_offset - 1), width))
 
     if r_start >= r_end or c_start >= c_end:
         return
@@ -726,28 +837,32 @@ def merge_images(
     proxy_cols = list(range(0, proxy_width - proxy_tile_size, proxy_stride))
     proxy_cols.append(proxy_width - proxy_tile_size)  # Edge coverage
 
+    reference_pyramids = [reference_luma_proxy]  # Level 0
+    for _ in range(2):  # Level 1 and 2
+        reference_pyramids.append(downsample_luma_proxy(reference_pyramids[-1]))
+
     # Note: we need to loop through the reference image using the same tiling logic as the target images.
     # This ensures the spatial weights (the "window sum") are perfectly uniform across the frame.
-    for img_idx in trange(len(burst_images), desc="Align&Merge (Images)", leave=True, position=0):
+    for img_idx in trange(len(burst_images), desc="Align&Merge (Images)", ascii=True):
         if img_idx != sharpest_image_idx:
-            target_luma_proxy = get_luma_proxy(burst_images[img_idx], metadata[img_idx])
+            target_pyramids = [get_luma_proxy(burst_images[img_idx], metadata[img_idx])]
+            for _ in range(2):  # Level 1 and 2
+                target_pyramids.append(downsample_luma_proxy(target_pyramids[-1]))
 
         for proxy_row in proxy_rows:
             for proxy_col in proxy_cols:
                 if img_idx == sharpest_image_idx:
                     row_offset, col_offset, score = 0, 0, 0
                 else:
-                    row_offset, col_offset, score = find_best_offset(
-                        reference_proxy=reference_luma_proxy,
-                        target_proxy=target_luma_proxy,
+                    row_offset, col_offset, score = find_best_offset_pyramids(
+                        reference_pyramids=reference_pyramids,
+                        target_pyramids=target_pyramids,
                         row_start=proxy_row,
                         col_start=proxy_col,
                         tile_size=proxy_tile_size,
-                        max_offset=proxy_max_offset,
                         noise_scales=noise_scales,
                         noise_offsets=noise_offsets,
                     )
-
                 # Merging is done on full-res image, thus size_scaler is used
                 merge_tile(
                     merged_accumulator=merged_accumulator,
