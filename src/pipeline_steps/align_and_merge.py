@@ -53,9 +53,27 @@ def get_luma_proxy(raw_image: np.ndarray, metadata: dict[str, Any]) -> np.ndarra
 
 
 def downsample_luma_proxy(proxy: np.ndarray) -> np.ndarray:
+    """
+    Downsamples a luma proxy by a factor of 2 using box averaging.
+
+    This function prepares the next level of an image pyramid. It ensures the
+    input dimensions are even to maintain consistent 2x2 block alignment,
+    averaging each quad into a single pixel at the coarser resolution.
+
+    Args:
+        proxy: A 2D grayscale array (luma proxy) at the current pyramid level.
+
+    Returns:
+        A 2D array with half the width and height of the input, representing
+        the next coarsest level in the pyramid.
+
+    """
     height, width = proxy.shape
+    # Ensure even dimensions for 2x2 reshaping
     height, width = height & ~1, width & ~1
     proxy = proxy[:height, :width]
+
+    # Reshape to (H', 2, W', 2) and average over the 2x2 blocks
     return proxy.reshape(height // 2, 2, width // 2, 2).mean(axis=(1, 3))
 
 
@@ -418,8 +436,8 @@ def _compute_tile_sad(
         inv_sigma: Pre-calculated inverse noise floor (1/sigma) for normalization.
 
     Returns:
-        float: The normalized SAD score. A value of ~1.0 indicates differences
-               consistent with the expected noise floor.
+        float or None: The normalized SAD score. A value of ~1.0 indicates differences
+               consistent with the expected noise floor. None if offsets are out of bounds.
 
     """
 
@@ -468,12 +486,32 @@ def find_best_integer_offset(
     search_radius: int,
     inv_sigma: float,
 ) -> tuple[int, int, float]:
+    """
+    Performs a local exhaustive search for the best integer translation.
+
+    Args:
+        reference_proxy: Grayscale reference image at a specific pyramid level.
+        target_proxy: Grayscale target image to be aligned.
+        row_start: Top row index of the tile in the proxy coordinate system.
+        col_start: Left column index of the tile in the proxy coordinate system.
+        tile_size: Size of the tile (pixels).
+        hint_dy: Initial row offset guess (usually from a coarser level).
+        hint_dx: Initial column offset guess (usually from a coarser level).
+        search_radius: Number of pixels to search around the hint.
+        inv_sigma: Pre-calculated inverse noise standard deviation for normalization.
+
+    Returns:
+        tuple: (best_dy, best_dx, minimum_sad_score)
+
+    """
 
     min_sad = 1e20
     best_dy, best_dx = hint_dy, hint_dx
 
+    # Search a square window centered on the hint
     for dy in range(hint_dy - search_radius, hint_dy + search_radius + 1):
         for dx in range(hint_dx - search_radius, hint_dx + search_radius + 1):
+            # _compute_tile_sad handles boundary checks and returns None if out of bounds
             sad = _compute_tile_sad(dy, dx, reference_proxy, target_proxy, row_start, col_start, tile_size, inv_sigma)
             sad = 1e20 if (sad is None) else sad
             if sad < min_sad:
@@ -493,54 +531,31 @@ def find_best_offset_final(
     hint_dy: int,
     hint_dx: int,
     search_radius: int,
-    noise_scales: np.ndarray,
-    noise_offsets: np.ndarray,
+    inv_sigma: float,
 ) -> tuple[float, float, float]:
     """
-    Finds the integer translation (dy, dx) using Variance-Weighted SAD (VW-SAD).
+    Refines a coarse integer shift into a sub-pixel translation using quadratic fitting.
 
-    The score is normalized by the noise floor (sigma) of the tile, meaning a score of 1.0 indicates
-    that the average pixel difference matches the expected noise level.
+    This is the final step of the pyramid search, operating on the highest-resolution proxy.
+    It performs a narrow integer search followed by a 2D parabolic fit on the SAD surface.
 
     Args:
-        reference_proxy: The reference grayscale image (usually the first frame).
-        target_proxy: The target grayscale image to be aligned.
-        row_start: Top row index of the tile in the proxy coordinate system.
-        col_start: Left column index of the tile in the proxy coordinate system.
-        tile_size: The width/height of the tile in proxy pixels.
-        search_radius: The maximum pixels to search in any direction.
-        noise_scales: 2x2 matrix of shot noises per-channel
-        noise_offsets: 2x2 matrix of matrix read noise per-channel
+        reference_proxy: Level 0 (highest resolution) grayscale proxy.
+        target_proxy: Level 0 grayscale target image.
+        row_start: Top row index of the tile in Level 0 pixels.
+        col_start: Left column index of the tile in Level 0 pixels.
+        tile_size: Size of the tile in pixels.
+        hint_dy: Initial row offset guess (from level 1).
+        hint_dx: Initial column offset guess (from level 1).
+        search_radius: Local search area (typically 1).
+        inv_sigma: Noise-normalization factor.
 
     Returns:
-        A tuple of (best_dy, best_dx, minimum_sad).
+        tuple: (subpixel_dy, subpixel_dx, normalized_sad_score)
 
     """
 
-    # --- 1. Noise Floor & Normalization Setup ---
-
-    # Calculate the noise floor for this tile
-    ref_tile = reference_proxy[row_start : row_start + tile_size, col_start : col_start + tile_size]
-    tile_mean = np.mean(ref_tile)
-
-    # Average noise parameters for the luma proxy
-    avg_scale = np.mean(noise_scales)
-    avg_offset = np.mean(noise_offsets)
-
-    # Statistical correction: Luma proxy averaging reduces variance by ~4x
-    # Must account for this so the SAD (from proxy) matches the Noise Model
-    # Since luma proxy weighs greens more, the actual value is
-    # 0.15**2 + 0.35**2 + 0.35**2 + 0.15**2 = 0.29
-    proxy_variance_scale = 0.29
-
-    # Variance of the difference: Var(Ref - Tgt) = Var(Ref) + Var(Tgt) ≈ 2 * Var(Ref)
-    # Assumes that Var(Reference) ≈ Var(Target)
-    # Given the NoiseProfile from the metadata, the noise model is: sigma^2 = g * x + c
-    sigma_sq = max(1e-9, 2.0 * (avg_scale * tile_mean + avg_offset)) * proxy_variance_scale
-    inv_sigma = 1.0 / (np.sqrt(sigma_sq) + 1e-8)
-
-    # --- 2. Pass 1: Global Integer Search ---
-
+    # --- 1. Local Integer Refinement ---
     best_dy_int, best_dx_int, min_sad = find_best_integer_offset(
         reference_proxy=reference_proxy,
         target_proxy=target_proxy,
@@ -553,44 +568,35 @@ def find_best_offset_final(
         inv_sigma=inv_sigma,
     )
 
-    # --- 3. Pass 2: Sub-pixel Refinement within 3x3 neighborhood ---
-
-    # Populate a 3x3 grid centered on (best_dy_int, best_dx_int)
+    # --- 2. Sub-pixel Refinement within 3x3 neighborhood ---
+    # Centered on the best integer offset to calculate the surface curvature
     neighborhood = np.zeros((3, 3), dtype=np.float32)
     neighborhood[1, 1] = min_sad
 
-    # Define the "Cross" relative offsets
-    # Directions: Up (N), Down (S), Left (W), Right (E)
+    # Up, Down, Left, Right
     cross_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1)]
 
     for offset_row, offset_col in cross_offsets:
         dy, dx = best_dy_int + offset_row, best_dx_int + offset_col
         sad = _compute_tile_sad(dy, dx, reference_proxy, target_proxy, row_start, col_start, tile_size, inv_sigma)
-        # If neighbor is off-screen - mark it as "Pending" by assigning -1.
-        # It will be fixed after the loop (using the opposite neighbor).
-        sad = -1 if (sad is None) else sad
-        neighborhood[offset_row + 1, offset_col + 1] = sad
+        # Use -1 as a sentinel for tiles that fall off the image sensor boundary
+        neighborhood[offset_row + 1, offset_col + 1] = -1 if (sad is None) else sad
 
-    # --- 4. Fill Missing Neighbors (Symmetric Fallback) ---
-
+    # --- 3. Boundary Fallback ---
+    # If a neighbor is off-screen, mirror the SAD value from the opposite side
+    # to allow the parabola to still be calculated.
     for i, j in cross_offsets:
         row_idx, col_idx = i + 1, j + 1
         if neighborhood[row_idx, col_idx] < 0:
             # Find the opposite neighbor's value
-            # Indices: North[0,1] <-> South[2,1], West[1,0] <-> East[1,2]
             opp_val = neighborhood[1 - i, 1 - j]
-            # If opp_val is -1.0, max(opp_val, min_sad) returns min_sad
-            # Otherwise, it returns the valid opposite neighbor score
             neighborhood[row_idx, col_idx] = max(opp_val, min_sad)
 
-    # --- 5. Quadratic Surface Fitting ---
-
+    # --- 4. Sub-pixel Parabola Fitting ---
+    # find_subpixel_shift fits a 1D parabola to rows and columns independently
     sub_dy, sub_dx = find_subpixel_shift(neighborhood)
-    # Final coordinates combine integer search + fractional refinement
-    best_dy_float = float(best_dy_int) + sub_dy
-    best_dx_float = float(best_dx_int) + sub_dx
 
-    return best_dy_float, best_dx_float, min_sad
+    return float(best_dy_int) + sub_dy, float(best_dx_int) + sub_dx, min_sad
 
 
 @njit(fastmath=True)
@@ -600,21 +606,44 @@ def find_best_offset_pyramids(
     row_start: int,  # Coordinates at Level 0
     col_start: int,
     tile_size: int,
+    search_radius: int,
     noise_scales: np.ndarray,
     noise_offsets: np.ndarray,
 ) -> tuple[float, float, float]:
+    """
+    Performs hierarchical motion estimation across a 3-level image pyramid.
+
+    This function implements a coarse-to-fine search:
+    1. Level 2 (1/4 proxy scale): Finds large-scale motion with a wide search.
+    2. Level 1 (1/2 proxy scale): Refines the previous guess in a narrow window.
+    3. Level 0 (Full proxy scale): Final sub-pixel refinement via find_best_offset_final.
+
+    Args:
+        reference_pyramids: List of [Level0, Level1, Level2] reference images.
+        target_pyramids: List of [Level0, Level1, Level2] target images.
+        row_start: Top row index of the tile in Level 0 pixels (highest resolution).
+        col_start: Left column index of the tile in Level 0 pixels (highest resolution).
+        tile_size: Pixel size of tiles (constant across levels).
+        search_radius: Max search distance in proxy pixels at Level 0.
+        noise_scales: 2x2 matrix of shot noises per-channel
+        noise_offsets: 2x2 matrix of matrix read noise per-channel
+
+    Returns:
+        tuple: (final_dy, final_dx, final_sad_score)
+
+    """
 
     # --- 1. Noise Floor & Normalization Setup ---
 
-    # Calculate the noise floor for this tile
+    # We calculate the noise floor based on Level 0 luma mean.
     ref_tile = reference_pyramids[0][row_start : row_start + tile_size, col_start : col_start + tile_size]
     tile_mean = np.mean(ref_tile)
 
-    # Average noise parameters for the luma proxy
+    # Average noise parameters (G and B channels usually share similar noise)
     avg_scale = np.mean(noise_scales)
     avg_offset = np.mean(noise_offsets)
 
-    # Statistical correction: Luma proxy averaging reduces variance by ~4x
+    # Statistical correction: averaging RGGB into Luma reduces variance by ~4x.
     # Must account for this so the SAD (from proxy) matches the Noise Model
     # Since luma proxy weighs greens more, the actual value is
     # 0.15**2 + 0.35**2 + 0.35**2 + 0.15**2 = 0.29
@@ -626,8 +655,8 @@ def find_best_offset_pyramids(
     sigma_sq = max(1e-9, 2.0 * (avg_scale * tile_mean + avg_offset)) * proxy_variance_scale
     inv_sigma = 1.0 / (np.sqrt(sigma_sq) + 1e-8)
 
-    # 1. Coarsest Level (Level 2: 1/8 of RAW, 1/4 of Proxy)
-    # Search radius can be larger here to catch big movement
+    # --- 2. Coarsest Level (Level 2: 1/4 of Proxy) ---
+    # Search radius is scaled down. A 1px shift here = 4px at Level 0.
     best_dy, best_dx, _ = find_best_integer_offset(
         reference_proxy=reference_pyramids[2],
         target_proxy=target_pyramids[2],
@@ -636,12 +665,12 @@ def find_best_offset_pyramids(
         tile_size=tile_size,
         hint_dy=0,
         hint_dx=0,
-        search_radius=4,
+        search_radius=search_radius // 4,
         inv_sigma=inv_sigma,
     )
 
-    # 2. Middle Level (Level 1: 1/4 of RAW, 1/2 of Proxy)
-    # Refine within a tiny +/- 1 pixel window
+    # --- 3. Middle Level (Level 1: 1/2 of Proxy) ---
+    # Multiply coarsest shift by 2 to align with Level 1 scale.
     best_dy, best_dx, _ = find_best_integer_offset(
         reference_proxy=reference_pyramids[1],
         target_proxy=target_pyramids[1],
@@ -654,19 +683,18 @@ def find_best_offset_pyramids(
         inv_sigma=inv_sigma,
     )
 
-    # 3. Level 0 (1/2 of RAW) - Final Refinement
-    # Take the integer result and apply your existing sub-pixel logic
+    # --- 4. Level 0 (Highest Res Proxy) ---
+    # Final refinement with sub-pixel interpolation.
     return find_best_offset_final(
         reference_proxy=reference_pyramids[0],
         target_proxy=target_pyramids[0],
         row_start=row_start,
         col_start=col_start,
         tile_size=tile_size,
-        hint_dy=best_dy,
-        hint_dx=best_dx,
+        hint_dy=best_dy * 2,
+        hint_dx=best_dx * 2,
         search_radius=1,
-        noise_scales=noise_scales,
-        noise_offsets=noise_offsets,
+        inv_sigma=inv_sigma,
     )
 
 
@@ -748,7 +776,7 @@ def merge_images(
     burst_images: list[np.ndarray],
     metadata: list[dict[str, Any]],
     tile_size: int = 32,
-    max_search_offset: int = 8,
+    max_search_radius: int = 32,
 ) -> np.ndarray:
     """
     Performs block-based alignment and temporal merging of a RAW image burst.
@@ -764,8 +792,9 @@ def merge_images(
             exposure time, black level).
         tile_size: The width/height of the processing tile in full-resolution pixels.
             Must be a multiple of the downsampling factor (usually 2).
-        max_search_offset: The maximum distance (in full-res pixels) the algorithm
+        max_search_radius: The maximum distance (in full-res pixels) the algorithm
             will search for a matching block in any direction.
+            Should be multiple of 8 and at least 32.
 
     Returns:
         np.ndarray: The merged RAW image of shape (H, W), normalized by tile weights.
@@ -774,6 +803,7 @@ def merge_images(
         ValueError: If fewer than two images are provided.
         ValueError: If the images in the burst have inconsistent shapes.
         RuntimeError: If tile parameters are incompatible with the downsampling factor.
+        ValueError: If max_search_radius is not a multiple of 8.
 
     """
 
@@ -788,6 +818,9 @@ def merge_images(
             "The burst contains images with different exposures: %s. Bracketing is not yet supported."
             % [mtd["ExposureTime"] for mtd in metadata]
         )
+
+    if max_search_radius % 8 != 0:
+        raise ValueError(f"max_search_radius should be multiple of 8, but got {max_search_radius}")
 
     # 1. Find the image with the highest sharpness
     sharpest_image_idx = find_sharpest_image_idx(burst_images, metadata)
@@ -815,7 +848,7 @@ def merge_images(
     tile_stride = tile_size // 2
     proxy_tile_size = tile_size // size_scaler
     proxy_stride = tile_stride // size_scaler
-    proxy_max_offset = max_search_offset // size_scaler
+    proxy_max_search_radius = max_search_radius // size_scaler
 
     # 4. Noise Estimation & Adaptive K Calculation
     noise_scales, noise_offsets = get_noise_params_2x2(burst_images, metadata)
@@ -842,10 +875,10 @@ def merge_images(
         reference_pyramids.append(downsample_luma_proxy(reference_pyramids[-1]))
 
     # Note: we need to loop through the reference image using the same tiling logic as the target images.
-    # This ensures the spatial weights (the "window sum") are perfectly uniform across the frame.
+    #       This ensures the spatial weights (the "window sum") are perfectly uniform across the frame.
     for img_idx in trange(len(burst_images), desc="Align&Merge (Images)", ascii=True):
         if img_idx != sharpest_image_idx:
-            target_pyramids = [get_luma_proxy(burst_images[img_idx], metadata[img_idx])]
+            target_pyramids = [get_luma_proxy(burst_images[img_idx], metadata[img_idx])]  # Level 0
             for _ in range(2):  # Level 1 and 2
                 target_pyramids.append(downsample_luma_proxy(target_pyramids[-1]))
 
@@ -860,6 +893,7 @@ def merge_images(
                         row_start=proxy_row,
                         col_start=proxy_col,
                         tile_size=proxy_tile_size,
+                        search_radius=proxy_max_search_radius,
                         noise_scales=noise_scales,
                         noise_offsets=noise_offsets,
                     )
@@ -878,7 +912,7 @@ def merge_images(
                     k=k_adaptive,
                 )
 
-    # 5. Final normalization (weighted average across overlapping tiles)
+    # 6. Final normalization (weighted average across overlapping tiles)
     mask = weights_accumulator > 0
     merged_accumulator[mask] /= weights_accumulator[mask]
 
