@@ -94,9 +94,7 @@ def get_exposure_scalers(metadata: list[dict[str, Any]]) -> np.ndarray:
     return ref_exposure / exposures
 
 
-def find_sharpest_image_idx(
-    images: list[np.ndarray], metadata: list[dict[str, Any]], exposure_scalers: np.ndarray
-) -> int:
+def find_sharpest_image_idx(images: list[np.ndarray], metadata: list[dict[str, Any]]) -> int:
     """
     Identifies the sharpest frame in a burst to serve as the alignment base.
 
@@ -116,21 +114,32 @@ def find_sharpest_image_idx(
         int: The index of the frame with the highest relative sharpness.
 
     """
+    unique_exposures = {mtd["ExposureTime"] for mtd in metadata}
+    if len(unique_exposures) > 1:
+        logger.warning("The code is tested to work with up to 2 different exposures, but got %s" % unique_exposures)
 
     kernel = np.array([[0, 1, 0], [1, -4, 1], [0, 1, 0]], dtype=np.float32)  # Simple 3x3 Laplacian kernel
 
+    # Identify the "short" exposure group (the most frequent one)
+    # This ensures we pick the best from the 'standard' frames
+    exp_times = [mtd["ExposureTime"] for mtd in metadata]
+    most_common_exp = max(set(exp_times), key=exp_times.count)
+
     scores = []
-    for image, mtd, exp_sc in zip(images, metadata, exposure_scalers):
+    for idx in range(len(images)):
+        # Only consider frames from the majority exposure group to avoid brightness-bias in the Laplacian variance
+        if metadata[idx]["ExposureTime"] != most_common_exp:
+            continue
         # 1. Recalculate on-the-go to reduce memory footprint
-        luma_proxy = get_luma_proxy(image, mtd) * exp_sc
+        luma_proxy = get_luma_proxy(images[idx], metadata[idx])
         # 2. Light blur to suppress high-frequency noise that mimics sharpness
         # This ensures we measure actual structural edges, not sensor grain.
         smoothed = gaussian_filter(luma_proxy, sigma=0.5)
         # 3. Calculate Laplacian variance
-        scores.append(convolve(smoothed, kernel).var())
+        scores.append((idx, convolve(smoothed, kernel).var()))
 
-    best_idx, best_score = max(enumerate(scores), key=lambda x: x[1])
-    avg_score = sum(scores) / len(scores)
+    best_idx, best_score = max(scores, key=lambda x: x[1])
+    avg_score = sum(s[1] for s in scores) / len(scores)
     improvement = (best_score / (avg_score + 1e-9) - 1) * 100
 
     logger.info(f"Lucky Imaging: Selected frame `{best_idx}` ({improvement:+.1f}% sharper than burst average)")
@@ -639,6 +648,7 @@ def find_best_offset_pyramids(
     search_radius: int,
     noise_scales: np.ndarray,
     noise_offsets: np.ndarray,
+    exposure_scaler: float,
 ) -> tuple[float, float, float]:
     """
     Performs hierarchical motion estimation across a 3-level image pyramid.
@@ -679,10 +689,15 @@ def find_best_offset_pyramids(
     # 0.15**2 + 0.35**2 + 0.35**2 + 0.15**2 = 0.29
     proxy_variance_scale = 0.29
 
-    # Variance of the difference: Var(Ref - Tgt) = Var(Ref) + Var(Tgt) ≈ 2 * Var(Ref)
-    # Assumes that Var(Reference) ≈ Var(Target)
+    # Variance of Reference: Var_ref = g*x + c
+    # Variance of Target (Scaled): Var_tgt = (scaler^2) * (g*(x/scaler) + c)
+    #                                      = scaler*g*x + (scaler^2)*c
+    # Total Variance = Var_ref + Var_tgt
+    var_ref = avg_scale * tile_mean + avg_offset
+    var_tgt = (exposure_scaler * avg_scale * tile_mean) + (exposure_scaler**2 * avg_offset)
+
     # Given the NoiseProfile from the metadata, the noise model is: sigma^2 = g * x + c
-    sigma_sq = max(1e-9, 2.0 * (avg_scale * tile_mean + avg_offset)) * proxy_variance_scale
+    sigma_sq = max(1e-9, var_ref + var_tgt) * proxy_variance_scale
     inv_sigma = 1.0 / (np.sqrt(sigma_sq) + 1e-8)
 
     # --- 2. Coarsest Level (Level 2: 1/4 of Proxy) ---
@@ -742,6 +757,9 @@ def merge_tile(
     blending_window: np.ndarray,
     k: float,
     use_l2_kernel: bool = False,
+    exposure_scaler: float = 1.0,
+    saturation_threshold: float = 0.95,
+    is_reference: bool = False,
 ) -> None:
     """
     Performs weighted merging of a tile from target image into the final image.
@@ -793,9 +811,15 @@ def merge_tile(
     # 3. Accumulation Loop
     for r in range(r_start, r_end):
         for c in range(c_start, c_end):
-            # subpixel sampling from the target image
+            # 1. Subpixel sampling from the target image
             val = sample_raw_bilinear(target_image, r, c, row_offset, col_offset)
-            # Combine the kernel weight (temporal) with the Hann window (spatial)
+            # 2. Check for saturation of the non-scaled pixel: if clipped, it carries no useful detail
+            # A value from reference image should be added anyway
+            if not is_reference and val > saturation_threshold:
+                continue
+            # 3. Scale pixel to match reference exposure
+            val *= exposure_scaler
+            # 4. Combine robustness weight with the spatial blending window
             combined_weight = weight * blending_window[r - row_start, c - col_start]
             merged_accumulator[r, c] += val * combined_weight
             weights_accumulator[r, c] += combined_weight
@@ -853,7 +877,7 @@ def merge_images(
 
     # 1. Find the image with the highest sharpness
     exposure_scalers = get_exposure_scalers(metadata)
-    sharpest_image_idx = find_sharpest_image_idx(burst_images, metadata, exposure_scalers)
+    sharpest_image_idx = find_sharpest_image_idx(burst_images, metadata)
     # The sharpest image will be our reference, other images will be merged into it
     reference_image = burst_images[sharpest_image_idx]
     reference_metadata = metadata[sharpest_image_idx]
@@ -908,7 +932,9 @@ def merge_images(
     #       This ensures the spatial weights (the "window sum") are perfectly uniform across the frame.
     for img_idx in trange(len(burst_images), desc="Align&Merge (Images)", ascii=True):
         if img_idx != sharpest_image_idx:
-            target_pyramids = [get_luma_proxy(burst_images[img_idx], metadata[img_idx])]  # Level 0
+            target_pyramids = [
+                get_luma_proxy(burst_images[img_idx], metadata[img_idx]) * exposure_scalers[img_idx]
+            ]  # Level 0
             for _ in range(2):  # Level 1 and 2
                 target_pyramids.append(downsample_luma_proxy(target_pyramids[-1]))
 
@@ -926,6 +952,7 @@ def merge_images(
                         search_radius=proxy_max_search_radius,
                         noise_scales=noise_scales,
                         noise_offsets=noise_offsets,
+                        exposure_scaler=exposure_scalers[img_idx],
                     )
                 # Merging is done on full-res image, thus size_scaler is used
                 merge_tile(
@@ -940,6 +967,8 @@ def merge_images(
                     tile_size=tile_size,
                     blending_window=hann_window,
                     k=k_adaptive,
+                    exposure_scaler=exposure_scalers[img_idx],
+                    is_reference=(img_idx == sharpest_image_idx),
                 )
 
     # 6. Final normalization (weighted average across overlapping tiles)
