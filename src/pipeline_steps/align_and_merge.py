@@ -122,6 +122,7 @@ def find_sharpest_image_idx(images: list[np.ndarray], metadata: list[dict[str, A
 
     # Identify the "short" exposure group (the most frequent one)
     # This ensures we pick the best from the 'standard' frames
+    # TODO (andrei aksionau): ensure that we are searching only from the short exposure images
     exp_times = [mtd["ExposureTime"] for mtd in metadata]
     most_common_exp = max(set(exp_times), key=exp_times.count)
 
@@ -756,7 +757,6 @@ def merge_tile(
     tile_size: int,
     blending_window: np.ndarray,
     k: float,
-    use_l2_kernel: bool = False,
     exposure_scaler: float = 1.0,
     saturation_threshold: float = 0.95,
     is_reference: bool = False,
@@ -783,20 +783,30 @@ def merge_tile(
         k:
            - High k (4.0 - 12.0): Promotes temporal averaging (ideal for high-ISO denoising).
            - Low k (0.5 - 1.0): Promotes frame rejection (ideal for sharp motion/ghosting).
-        use_l2_kernel: if False - L1 kernel is used
-           - L1 (Laplacian weighting): Best for static, noisy backgrounds.
-           - L2 (Gaussian weighting): Best for aggressive ghosting rejection.
 
     """
 
     height, width = merged_accumulator.shape
 
-    # 1. Calculate the Kernel Weight (Rejection vs. Averaging)
-    weight = np.exp(-(sad_score**2) / k**2) if use_l2_kernel else np.exp(-sad_score / k)
-    if weight < 1e-4:
+    # 1. Temporal robustness
+    # Determines if the tile matches the reference. If SAD is high (ghosting/motion),
+    # the weight drops to near zero, effectively ignoring this specific tile.
+    robustness_weight = np.exp(-sad_score / k)
+    if robustness_weight < 1e-4:
         return
 
-    # 2. Boundary-safe intersection
+    # 2. Snr priority
+    # In linear space, SNR is proportional to exposure time. We weight the long
+    # exposure frame higher (e.g., if 4x longer, it gets 4x weight) so it dominates
+    # the shadow/midtone average, significantly reducing visible noise.
+    snr_weight = 1.0 / exposure_scaler
+
+    # 3. Transition parameters
+    # We want to use the 'clean' long exposure as late as possible.
+    edge_softness = 0.05
+    lower_bound = saturation_threshold - edge_softness  # e.g., 0.90
+
+    # 4. Boundary-safe intersection
     # We must ensure that [r + row_offset] and [c + col_offset] stay within
     # the target_image bounds. We add a 1-pixel margin for the bilinear interpolation.
     r_start = int(max(row_start, np.ceil(-row_offset), 0))
@@ -808,20 +818,31 @@ def merge_tile(
     if r_start >= r_end or c_start >= c_end:
         return
 
-    # 3. Accumulation Loop
+    # 5. Accumulation Loop
     for r in range(r_start, r_end):
         for c in range(c_start, c_end):
-            # 1. Subpixel sampling from the target image
-            val = sample_raw_bilinear(target_image, r, c, row_offset, col_offset)
-            # 2. Check for saturation of the non-scaled pixel: if clipped, it carries no useful detail
+            # Subpixel sampling from the target image
+            raw_val = sample_raw_bilinear(target_image, r, c, row_offset, col_offset)
+            # Check for saturation of the non-scaled pixel: if clipped, it carries no useful detail
             # A value from reference image should be added anyway
-            if not is_reference and val > saturation_threshold:
+            if not is_reference and raw_val > saturation_threshold:
                 continue
-            # 3. Scale pixel to match reference exposure
-            val *= exposure_scaler
-            # 4. Combine robustness weight with the spatial blending window
-            combined_weight = weight * blending_window[r - row_start, c - col_start]
-            merged_accumulator[r, c] += val * combined_weight
+            # If the pixel is in the 'danger zone' [0.90, 0.95], we linearly reduce
+            # the long exposure's weight. This forces the accumulator to cross-fade
+            # to the short-exposure frames, preventing jagged clipping edges.
+            if not is_reference and raw_val > lower_bound:
+                fade = (saturation_threshold - raw_val) / edge_softness
+            else:
+                fade = 1.0
+            # Reference always has weight 1.0; others are scaled by SNR and the Fade ramp.
+            current_snr_w = 1.0 if is_reference else (snr_weight * fade)
+
+            # Spatial blending
+            # Combines robustness (motion), SNR (quality), and the Hann window (seams).
+            combined_weight = robustness_weight * current_snr_w * blending_window[r - row_start, c - col_start]
+
+            # Linearize and Accumulate
+            merged_accumulator[r, c] += (raw_val * exposure_scaler) * combined_weight
             weights_accumulator[r, c] += combined_weight
 
 
