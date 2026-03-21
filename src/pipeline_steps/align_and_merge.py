@@ -77,8 +77,31 @@ def downsample_luma_proxy(proxy: np.ndarray) -> np.ndarray:
     return proxy.reshape(height // 2, 2, width // 2, 2).mean(axis=(1, 3))
 
 
-# TODO (andrei aksionau): write a docstring
 def get_exposure_scalers(metadata: list[dict[str, Any]]) -> np.ndarray:
+    """
+    Calculates normalization factors for a burst of images with varying exposure times.
+
+    This function identifies the shortest exposure in the burst and calculates a
+    scaler for every frame. These scalers are used to linearize the brightness
+    across the burst and to determine the SNR-based weight during merging.
+
+    Args:
+        metadata (list[dict[str, Any]]): A list of metadata dictionaries for each
+            frame in the burst. Each dictionary must contain the key "ExposureTime",
+            which can be a float, an integer, or a fractional string (e.g., "1/100").
+
+    Returns:
+        np.ndarray: A 1D float32 array of scalers, one for each frame.
+            The scaler for the shortest exposure(s) will be 1.0. Frames with
+            longer exposures will have scalers < 1.0 (e.g., a 4x longer exposure
+            results in a 0.25 scaler).
+
+    Note:
+        Multiplying a long-exposure RAW value by its scaler effectively 'underexposes'
+        it to match the reference short exposure, allowing for an apples-to-apples
+        comparison and merge.
+
+    """
 
     def parse_expr(value: str) -> float:
         if isinstance(value, str) and "/" in value:
@@ -91,7 +114,8 @@ def get_exposure_scalers(metadata: list[dict[str, Any]]) -> np.ndarray:
     ref_exposure = exposures.min()
 
     # Normalize other exposures
-    return ref_exposure / exposures
+    # result = (Shortest Time) / (Current Frame Time)
+    return (ref_exposure / exposures).astype(np.float32)
 
 
 def find_sharpest_image_idx(images: list[np.ndarray], metadata: list[dict[str, Any]]) -> int:
@@ -674,6 +698,7 @@ def find_best_offset_pyramids(
         search_radius: Max search distance in proxy pixels at Level 0.
         noise_scales: 2x2 matrix of shot noises per-channel
         noise_offsets: 2x2 matrix of matrix read noise per-channel
+        exposure_scaler: Normalization factor w.r.t. to exposure of the reference frame.
 
     Returns:
         tuple: (final_dy, final_dx, final_sad_score)
@@ -763,14 +788,23 @@ def merge_tile(
     tile_size: int,
     blending_window: np.ndarray,
     k: float,
-    exposure_scaler: float = 1.0,
+    exposure_scaler: float,
     saturation_threshold: float = 0.95,
     is_reference: bool = False,
 ) -> None:
     """
-    Performs weighted merging of a tile from target image into the final image.
+    Performs SNR-prioritized weighted merging of a tile into the final image buffers.
 
-    Tiles with lower SAD scores (better alignment) are given higher weights.
+    This function integrates three distinct weighting components to produce a
+    high-dynamic-range, denoised result:
+    1. **Temporal Robustness:** Uses an exponential SAD-based weight to reject
+       misaligned or moving pixels (ghosting prevention).
+    2. **SNR Priority:** Uses the exposure ratio to prioritize cleaner (long-exposure)
+       pixels in shadows/midtones.
+    3. **Spatial Blending:** Uses a 2D window (e.g., Hann) to eliminate tile seams.
+
+    It also implements a soft-thresholding roll-off to transition away from
+    long-exposure pixels as they approach the saturation point.
 
     Args:
         merged_accumulator: The full-res buffer accumulating weighted pixel values (H, W).
@@ -789,6 +823,13 @@ def merge_tile(
         k:
            - High k (4.0 - 12.0): Promotes temporal averaging (ideal for high-ISO denoising).
            - Low k (0.5 - 1.0): Promotes frame rejection (ideal for sharp motion/ghosting).
+        exposure_scaler (float): The ratio (Reference_Exp / Target_Exp).
+            Used to linearize brightness and derive the SNR weight.
+        saturation_threshold (float, optional): The RAW value beyond which
+            pixels are considered clipped. Defaults to 0.95.
+        is_reference (bool, optional): If True, treats this as the anchor frame.
+            The reference frame bypasses SNR/Fade weighting and saturation
+            rejection to ensure a complete base image. Defaults to False.
 
     """
 
