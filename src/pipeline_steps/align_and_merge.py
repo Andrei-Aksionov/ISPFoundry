@@ -77,7 +77,26 @@ def downsample_luma_proxy(proxy: np.ndarray) -> np.ndarray:
     return proxy.reshape(height // 2, 2, width // 2, 2).mean(axis=(1, 3))
 
 
-def find_sharpest_image_idx(images: list[np.ndarray], metadata: list[dict[str, Any]]) -> int:
+# TODO (andrei aksionau): write a docstring
+def get_exposure_scalers(metadata: list[dict[str, Any]]) -> np.ndarray:
+
+    def parse_expr(value: str) -> float:
+        if isinstance(value, str) and "/" in value:
+            numerator, denominator = value.split("/")
+            return float(numerator) / float(denominator)
+        return float(value)
+
+    # Find the shortest exposure
+    exposures = np.array([parse_expr(mtd["ExposureTime"]) for mtd in metadata], dtype=np.float32)
+    ref_exposure = exposures.min()
+
+    # Normalize other exposures
+    return ref_exposure / exposures
+
+
+def find_sharpest_image_idx(
+    images: list[np.ndarray], metadata: list[dict[str, Any]], exposure_scalers: np.ndarray
+) -> int:
     """
     Identifies the sharpest frame in a burst to serve as the alignment base.
 
@@ -101,9 +120,9 @@ def find_sharpest_image_idx(images: list[np.ndarray], metadata: list[dict[str, A
     kernel = np.array([[0, 1, 0], [1, -4, 1], [0, 1, 0]], dtype=np.float32)  # Simple 3x3 Laplacian kernel
 
     scores = []
-    for image, mtd in zip(images, metadata):
+    for image, mtd, exp_sc in zip(images, metadata, exposure_scalers):
         # 1. Recalculate on-the-go to reduce memory footprint
-        luma_proxy = get_luma_proxy(image, mtd)
+        luma_proxy = get_luma_proxy(image, mtd) * exp_sc
         # 2. Light blur to suppress high-frequency noise that mimics sharpness
         # This ensures we measure actual structural edges, not sensor grain.
         smoothed = gaussian_filter(luma_proxy, sigma=0.5)
@@ -814,16 +833,16 @@ def merge_images(
         raise ValueError("All images in the burst must have the same shape.")
 
     if not all(metadata[0]["ExposureTime"] == mtd["ExposureTime"] for mtd in metadata[1:]):
-        logger.warning(
-            "The burst contains images with different exposures: %s. Bracketing is not yet supported."
-            % [mtd["ExposureTime"] for mtd in metadata]
+        logger.info(
+            "The burst contains images with different exposures: %s." % [mtd["ExposureTime"] for mtd in metadata]
         )
 
     if max_search_radius % 8 != 0:
         raise ValueError(f"max_search_radius should be multiple of 8, but got {max_search_radius}")
 
     # 1. Find the image with the highest sharpness
-    sharpest_image_idx = find_sharpest_image_idx(burst_images, metadata)
+    exposure_scalers = get_exposure_scalers(metadata)
+    sharpest_image_idx = find_sharpest_image_idx(burst_images, metadata, exposure_scalers)
     # The sharpest image will be our reference, other images will be merged into it
     reference_image = burst_images[sharpest_image_idx]
     reference_metadata = metadata[sharpest_image_idx]
