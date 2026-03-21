@@ -73,74 +73,83 @@ class TestGetLumaProxy:
 class TestFindSharpestImageIdx:
     @pytest.fixture
     def base_metadata(self):
-        return {"color_desc": "RGBG", "raw_pattern": [[0, 1], [3, 2]], "ISO": 100}
+        # We now include the required 'ExposureTime' key
+        # 'color_desc' and 'raw_pattern' are needed by get_luma_proxy
+        return {"color_desc": "RGBG", "raw_pattern": [[0, 1], [3, 2]], "ISO": 100, "ExposureTime": "1/1000"}
 
-    def test_selects_sharpest_image(self, base_metadata):
-        """Test that a sharp image is preferred over a blurred one."""
-        # Image 0: Sharp edges (8x8 blocks so they survive 2x2 downsampling)
+    def test_selects_sharpest_within_short_exposure_group(self, base_metadata):
+        """Test that the sharpest image is chosen among frames with the same short exposure."""
         sharp = np.zeros((32, 32), dtype=np.uint16)
         row, col = np.indices(sharp.shape)
         mask = (row // 8 + col // 8) % 2 == 0
         sharp[mask] = 1000
 
-        # Using a heavy blur on the sharp image to create a realistic 'blurry' frame
         blurry = gaussian_filter(sharp.astype(float), sigma=4.0).astype(np.uint16)
 
         images = [blurry, sharp]
-        metadata = [base_metadata] * 2
+        # Both are "short" exposures
+        metadata = [base_metadata.copy() for _ in range(2)]
 
         best_idx = find_sharpest_image_idx(images, metadata)
+        assert best_idx == 1
 
-        # The sharp image has high-contrast transitions that survive the proxy
-        # downsampling and the sigma=0.5 smoothing.
+    def test_prefers_short_exposure_over_sharp_long_exposure(self, base_metadata):
+        """Test that the logic correctly excludes long exposures from selection, even if the long exposure appears 'sharper' due to higher signal/contrast."""
+        # 1. Create a "Long Exposure" image: very sharp, high contrast
+        long_exp_img = np.zeros((32, 32), dtype=np.uint16)
+        row, col = np.indices(long_exp_img.shape)
+        mask = (row // 8 + col // 8) % 2 == 0
+        long_exp_img[mask] = 4000  # High signal
+        long_metadata = base_metadata.copy()
+        long_metadata["ExposureTime"] = "1/250"  # 4x longer than base
+
+        # 2. Create a "Short Exposure" image: slightly blurry, lower contrast
+        # In a real burst, this might happen due to slight hand shake
+        short_exp_img = np.zeros((32, 32), dtype=np.uint16)
+        short_exp_img[mask] = 1000  # Lower signal
+        short_exp_img = gaussian_filter(short_exp_img.astype(float), sigma=0.8).astype(np.uint16)
+        short_metadata = base_metadata.copy()
+        short_metadata["ExposureTime"] = "1/1000"
+
+        # Even though index 0 (long) is mathematically "sharper" (higher variance),
+        # index 1 (short) MUST be selected to avoid clipped highlights.
+        images = [long_exp_img, short_exp_img]
+        metadata = [long_metadata, short_metadata]
+
+        best_idx = find_sharpest_image_idx(images, metadata)
         assert best_idx == 1
 
     def test_noise_robustness(self, base_metadata):
-        """Test that the Gaussian blur prevents high-frequency noise from winning."""
-        # Image 0: Pure random noise (high variance, but not 'sharp' detail)
+        """Test that Gaussian smoothing prevents sensor noise from being mistaken for sharpness."""
+        # Pure noise
         noisy = np.random.randint(400, 600, (32, 32)).astype(np.uint16)
 
-        # Image 1: Clean image with actual structural edges
-        # We make a strong edge that survives the sigma=0.5 blur
+        # Actual structure
         structural = np.zeros((32, 32), dtype=np.uint16)
         structural[:16, :] = 800
 
         images = [noisy, structural]
-        metadata = [base_metadata] * 2
+        metadata = [base_metadata.copy() for _ in range(2)]
 
         best_idx = find_sharpest_image_idx(images, metadata)
-
-        # With sigma=0.5, the structural edge should yield higher Laplacian variance
-        # than the suppressed random noise.
         assert best_idx == 1
 
-    def test_identical_images(self, base_metadata):
-        """Test that it returns the first index if all images are identical."""
+    def test_handles_mixed_string_and_float_exposure(self, base_metadata):
+        """Ensure the parser handles both fractional strings and floats in metadata."""
         img = np.full((32, 32), 500, dtype=np.uint16)
-        images = [img, img, img]
-        metadatas = [base_metadata] * 3
 
-        best_idx = find_sharpest_image_idx(images, metadatas)
-        assert best_idx == 0
+        m1 = base_metadata.copy()
+        m1["ExposureTime"] = "1/500"
 
-    def test_handles_different_exposure_proxies(self, base_metadata):
-        """Test that it handles images with different brightness levels correctly."""
+        m2 = base_metadata.copy()
+        m2["ExposureTime"] = 0.002  # Equivalent to 1/500
 
-        # Brightness alone shouldn't necessarily dictate sharpness,
-        # but higher contrast edges should score higher.
-        low_contrast = np.zeros((32, 32), dtype=np.uint16)
-        row, col = np.indices(low_contrast.shape)
-        mask = (row // 8 + col // 8) % 2 == 0
-        low_contrast[mask] = 100
+        images = [img, img]
+        metadata = [m1, m2]
 
-        high_contrast = low_contrast.copy()
-        high_contrast[mask] *= 10
-
-        images = [low_contrast, high_contrast]
-        metadata = [base_metadata] * 2
-
+        # Both are considered "short" (minimum), should default to first index if identical
         best_idx = find_sharpest_image_idx(images, metadata)
-        assert best_idx == 1
+        assert best_idx == 0
 
 
 class TestGetHannWindow2D:
@@ -424,7 +433,7 @@ class TestComputeTileSAD:
     def test_perfect_match(self, proxy_pair):
         """If frames are identical and offset is 0, SAD should be 0."""
         ref, tgt = proxy_pair
-        score = _compute_tile_sad(0, 0, ref, tgt, 10, 10, 16, 1.0)
+        score = _compute_tile_sad(0, 0, ref, tgt, 10, 10, 16, 1.0, 240)
         assert score == 0.0
 
     def test_known_difference(self, proxy_pair):
@@ -438,7 +447,7 @@ class TestComputeTileSAD:
         # Expected: (10.0 * 0.5) / (no area division because it cancels out in the loop)
         # Loop sum: 16 * 16 * (10.0) = 2560
         # Normalization (2560 * 0.5) / (16 * 16) = 5.0
-        score = _compute_tile_sad(0, 0, ref, tgt, 10, 10, tile_size, inv_sigma)
+        score = _compute_tile_sad(0, 0, ref, tgt, 10, 10, tile_size, inv_sigma, 240)
         assert np.isclose(score, 5.0)
 
     def test_partial_out_of_bounds_clipping(self, proxy_pair):
@@ -449,7 +458,7 @@ class TestComputeTileSAD:
 
         # Shift so only a 5x5 area of the tile is actually on the image
         # Tile size is 16, but we start at row -11
-        score = _compute_tile_sad(-11, 0, ref, tgt, 0, 0, 16, 1.0)
+        score = _compute_tile_sad(-11, 0, ref, tgt, 0, 0, 16, 1.0, 240)
 
         # Valid rows are max(0, -(-11)) = 11 to min(16, 100+11) = 16.
         # Intersection height is 5. Width is 16.
@@ -460,7 +469,7 @@ class TestComputeTileSAD:
         """Verify None is returned when there is no intersection."""
         ref, tgt = proxy_pair
         # Shift entirely off a 100x100 image
-        score = _compute_tile_sad(200, 200, ref, tgt, 0, 0, 16, 1.0)
+        score = _compute_tile_sad(200, 200, ref, tgt, 0, 0, 16, 1.0, 240)
         assert score is None
 
     def test_translation_consistency(self):
@@ -469,13 +478,13 @@ class TestComputeTileSAD:
         tgt = np.zeros((50, 50), dtype=np.float32)
 
         # Feature at (10, 10) in ref, moved to (12, 12) in target
-        ref[10:15, 10:15] = 255.0
-        tgt[12:17, 12:17] = 255.0
+        ref[10:15, 10:15] = 235.0
+        tgt[12:17, 12:17] = 235.0
 
         # If we shift by dy=2, dx=2, the SAD should be 0
-        score_correct = _compute_tile_sad(2, 2, ref, tgt, 10, 10, 5, 1.0)
+        score_correct = _compute_tile_sad(2, 2, ref, tgt, 10, 10, 5, 1.0, 240)
         # If we don't shift, the SAD should be high
-        score_wrong = _compute_tile_sad(0, 0, ref, tgt, 10, 10, 5, 1.0)
+        score_wrong = _compute_tile_sad(0, 0, ref, tgt, 10, 10, 5, 1.0, 240)
 
         assert score_correct == 0.0
         assert score_wrong > 0.0

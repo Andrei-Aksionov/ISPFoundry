@@ -77,6 +77,47 @@ def downsample_luma_proxy(proxy: np.ndarray) -> np.ndarray:
     return proxy.reshape(height // 2, 2, width // 2, 2).mean(axis=(1, 3))
 
 
+def get_exposure_scalers(metadata: list[dict[str, Any]]) -> np.ndarray:
+    """
+    Calculates normalization factors for a burst of images with varying exposure times.
+
+    This function identifies the shortest exposure in the burst and calculates a
+    scaler for every frame. These scalers are used to linearize the brightness
+    across the burst and to determine the SNR-based weight during merging.
+
+    Args:
+        metadata (list[dict[str, Any]]): A list of metadata dictionaries for each
+            frame in the burst. Each dictionary must contain the key "ExposureTime",
+            which can be a float, an integer, or a fractional string (e.g., "1/100").
+
+    Returns:
+        np.ndarray: A 1D float32 array of scalers, one for each frame.
+            The scaler for the shortest exposure(s) will be 1.0. Frames with
+            longer exposures will have scalers < 1.0 (e.g., a 4x longer exposure
+            results in a 0.25 scaler).
+
+    Note:
+        Multiplying a long-exposure RAW value by its scaler effectively 'underexposes'
+        it to match the reference short exposure, allowing for an apples-to-apples
+        comparison and merge.
+
+    """
+
+    def parse_expr(value: str) -> float:
+        if isinstance(value, str) and "/" in value:
+            numerator, denominator = value.split("/")
+            return float(numerator) / float(denominator)
+        return float(value)
+
+    # Find the shortest exposure
+    exposures = np.array([parse_expr(mtd["ExposureTime"]) for mtd in metadata], dtype=np.float32)
+    ref_exposure = exposures.min()
+
+    # Normalize other exposures
+    # result = (Shortest Time) / (Current Frame Time)
+    return (ref_exposure / exposures).astype(np.float32)
+
+
 def find_sharpest_image_idx(images: list[np.ndarray], metadata: list[dict[str, Any]]) -> int:
     """
     Identifies the sharpest frame in a burst to serve as the alignment base.
@@ -97,24 +138,42 @@ def find_sharpest_image_idx(images: list[np.ndarray], metadata: list[dict[str, A
         int: The index of the frame with the highest relative sharpness.
 
     """
+    unique_exposures = {mtd["ExposureTime"] for mtd in metadata}
+    if len(unique_exposures) > 1:
+        logger.warning("The code is tested to work with up to 2 different exposures, but got %s" % unique_exposures)
+
+    def parse_expr(value: str) -> float:
+        if isinstance(value, str) and "/" in value:
+            numerator, denominator = value.split("/")
+            return float(numerator) / float(denominator)
+        return float(value)
+
+    # Explicitly find the short exposure group
+    exp_times = [parse_expr(mtd["ExposureTime"]) for mtd in metadata]
+    min_exp = min(exp_times)
+
+    # Only consider frames within 1% of the minimum exposure time
+    short_indices = [i for i, t in enumerate(exp_times) if abs(t - min_exp) < (min_exp * 0.01)]
 
     kernel = np.array([[0, 1, 0], [1, -4, 1], [0, 1, 0]], dtype=np.float32)  # Simple 3x3 Laplacian kernel
-
     scores = []
-    for image, mtd in zip(images, metadata):
+
+    for idx in short_indices:
         # 1. Recalculate on-the-go to reduce memory footprint
-        luma_proxy = get_luma_proxy(image, mtd)
+        luma_proxy = get_luma_proxy(images[idx], metadata[idx])
         # 2. Light blur to suppress high-frequency noise that mimics sharpness
         # This ensures we measure actual structural edges, not sensor grain.
         smoothed = gaussian_filter(luma_proxy, sigma=0.5)
         # 3. Calculate Laplacian variance
-        scores.append(convolve(smoothed, kernel).var())
+        scores.append((idx, convolve(smoothed, kernel).var()))
 
-    best_idx, best_score = max(enumerate(scores), key=lambda x: x[1])
-    avg_score = sum(scores) / len(scores)
+    best_idx, best_score = max(scores, key=lambda x: x[1])
+
+    # Calculate average only of the short group for a meaningful 'improvement' metric
+    avg_score = sum(s[1] for s in scores) / len(scores)
     improvement = (best_score / (avg_score + 1e-9) - 1) * 100
 
-    logger.info(f"Lucky Imaging: Selected frame `{best_idx}` ({improvement:+.1f}% sharper than burst average)")
+    logger.info(f"Lucky Imaging: Selected frame `{best_idx}` ({improvement:+.1f}% sharper than short-exposure avg)")
     return best_idx
 
 
@@ -418,6 +477,7 @@ def _compute_tile_sad(
     col_start: int,
     tile_size: int,
     inv_sigma: float,
+    saturation_threshold: float = 0.95,
 ) -> float | None:
     """
     Computes the area-normalized, Variance-Weighted Sum of Absolute Differences (VW-SAD).
@@ -434,6 +494,8 @@ def _compute_tile_sad(
         col_start: Left-most coordinate of the tile in the reference frame.
         tile_size: Size (width/height) of the square tile.
         inv_sigma: Pre-calculated inverse noise floor (1/sigma) for normalization.
+        saturation_threshold: A value above this threshold is considered saturated and skipped
+            in SAD calculation
 
     Returns:
         float or None: The normalized SAD score. A value of ~1.0 indicates differences
@@ -460,15 +522,23 @@ def _compute_tile_sad(
     # Width Numba per-pixel calculation is faster
     # np.sum(np.abs(...)) leads to temporary array allocations
     sad = 0.0
+    non_clipped_count = 0
     rows, cols = ref_view.shape
     for r in range(rows):
         for c in range(cols):
-            # Direct subtraction and absolute value
-            sad += abs(ref_view[r, c] - tgt_view[r, c])
+            ref_val, tgt_val = ref_view[r, c], tgt_view[r, c]
+            # Only count pixels that are valid (not clipped) in both frames
+            if ref_val < saturation_threshold and tgt_val < saturation_threshold:
+                sad += abs(ref_val - tgt_val)
+                non_clipped_count += 1
+
+    # If 75%+ of a tile is pure white (clipped), there isn't enough texture left to determine an offset.
+    if non_clipped_count < (rows * cols) // 4:
+        return None
 
     # Normalization: If tiles are partially off-image, a smaller area will naturally have a lower SAD.
     # Divide by area to find the true best match per pixel.
-    return (sad * inv_sigma) / (rows * cols)
+    return (sad * inv_sigma) / non_clipped_count
 
 
 # ----------------------------------------- Merging functions -----------------------------------------
@@ -609,6 +679,7 @@ def find_best_offset_pyramids(
     search_radius: int,
     noise_scales: np.ndarray,
     noise_offsets: np.ndarray,
+    exposure_scaler: float,
 ) -> tuple[float, float, float]:
     """
     Performs hierarchical motion estimation across a 3-level image pyramid.
@@ -627,6 +698,7 @@ def find_best_offset_pyramids(
         search_radius: Max search distance in proxy pixels at Level 0.
         noise_scales: 2x2 matrix of shot noises per-channel
         noise_offsets: 2x2 matrix of matrix read noise per-channel
+        exposure_scaler: Normalization factor w.r.t. to exposure of the reference frame.
 
     Returns:
         tuple: (final_dy, final_dx, final_sad_score)
@@ -649,10 +721,15 @@ def find_best_offset_pyramids(
     # 0.15**2 + 0.35**2 + 0.35**2 + 0.15**2 = 0.29
     proxy_variance_scale = 0.29
 
-    # Variance of the difference: Var(Ref - Tgt) = Var(Ref) + Var(Tgt) ≈ 2 * Var(Ref)
-    # Assumes that Var(Reference) ≈ Var(Target)
+    # Variance of Reference: Var_ref = g*x + c
+    # Variance of Target (Scaled): Var_tgt = (scaler^2) * (g*(x/scaler) + c)
+    #                                      = scaler*g*x + (scaler^2)*c
+    # Total Variance = Var_ref + Var_tgt
+    var_ref = avg_scale * tile_mean + avg_offset
+    var_tgt = (exposure_scaler * avg_scale * tile_mean) + (exposure_scaler**2 * avg_offset)
+
     # Given the NoiseProfile from the metadata, the noise model is: sigma^2 = g * x + c
-    sigma_sq = max(1e-9, 2.0 * (avg_scale * tile_mean + avg_offset)) * proxy_variance_scale
+    sigma_sq = max(1e-9, var_ref + var_tgt) * proxy_variance_scale
     inv_sigma = 1.0 / (np.sqrt(sigma_sq) + 1e-8)
 
     # --- 2. Coarsest Level (Level 2: 1/4 of Proxy) ---
@@ -711,12 +788,23 @@ def merge_tile(
     tile_size: int,
     blending_window: np.ndarray,
     k: float,
-    use_l2_kernel: bool = False,
+    exposure_scaler: float,
+    saturation_threshold: float = 0.95,
+    is_reference: bool = False,
 ) -> None:
     """
-    Performs weighted merging of a tile from target image into the final image.
+    Performs SNR-prioritized weighted merging of a tile into the final image buffers.
 
-    Tiles with lower SAD scores (better alignment) are given higher weights.
+    This function integrates three distinct weighting components to produce a
+    high-dynamic-range, denoised result:
+    1. **Temporal Robustness:** Uses an exponential SAD-based weight to reject
+       misaligned or moving pixels (ghosting prevention).
+    2. **SNR Priority:** Uses the exposure ratio to prioritize cleaner (long-exposure)
+       pixels in shadows/midtones.
+    3. **Spatial Blending:** Uses a 2D window (e.g., Hann) to eliminate tile seams.
+
+    It also implements a soft-thresholding roll-off to transition away from
+    long-exposure pixels as they approach the saturation point.
 
     Args:
         merged_accumulator: The full-res buffer accumulating weighted pixel values (H, W).
@@ -735,20 +823,37 @@ def merge_tile(
         k:
            - High k (4.0 - 12.0): Promotes temporal averaging (ideal for high-ISO denoising).
            - Low k (0.5 - 1.0): Promotes frame rejection (ideal for sharp motion/ghosting).
-        use_l2_kernel: if False - L1 kernel is used
-           - L1 (Laplacian weighting): Best for static, noisy backgrounds.
-           - L2 (Gaussian weighting): Best for aggressive ghosting rejection.
+        exposure_scaler (float): The ratio (Reference_Exp / Target_Exp).
+            Used to linearize brightness and derive the SNR weight.
+        saturation_threshold (float, optional): The RAW value beyond which
+            pixels are considered clipped. Defaults to 0.95.
+        is_reference (bool, optional): If True, treats this as the anchor frame.
+            The reference frame bypasses SNR/Fade weighting and saturation
+            rejection to ensure a complete base image. Defaults to False.
 
     """
 
     height, width = merged_accumulator.shape
 
-    # 1. Calculate the Kernel Weight (Rejection vs. Averaging)
-    weight = np.exp(-(sad_score**2) / k**2) if use_l2_kernel else np.exp(-sad_score / k)
-    if weight < 1e-4:
+    # 1. Temporal robustness
+    # Determines if the tile matches the reference. If SAD is high (ghosting/motion),
+    # the weight drops to near zero, effectively ignoring this specific tile.
+    robustness_weight = np.exp(-sad_score / k)
+    if robustness_weight < 1e-4:
         return
 
-    # 2. Boundary-safe intersection
+    # 2. Snr priority
+    # In linear space, SNR is proportional to exposure time. We weight the long
+    # exposure frame higher (e.g., if 4x longer, it gets 4x weight) so it dominates
+    # the shadow/midtone average, significantly reducing visible noise.
+    snr_weight = 1.0 / max(exposure_scaler, 1e-5)
+
+    # 3. Transition parameters
+    # We want to use the 'clean' long exposure as late as possible.
+    edge_softness = 0.05
+    lower_bound = saturation_threshold - edge_softness  # e.g., 0.90
+
+    # 4. Boundary-safe intersection
     # We must ensure that [r + row_offset] and [c + col_offset] stay within
     # the target_image bounds. We add a 1-pixel margin for the bilinear interpolation.
     r_start = int(max(row_start, np.ceil(-row_offset), 0))
@@ -760,14 +865,31 @@ def merge_tile(
     if r_start >= r_end or c_start >= c_end:
         return
 
-    # 3. Accumulation Loop
+    # 5. Accumulation Loop
     for r in range(r_start, r_end):
         for c in range(c_start, c_end):
-            # subpixel sampling from the target image
-            val = sample_raw_bilinear(target_image, r, c, row_offset, col_offset)
-            # Combine the kernel weight (temporal) with the Hann window (spatial)
-            combined_weight = weight * blending_window[r - row_start, c - col_start]
-            merged_accumulator[r, c] += val * combined_weight
+            # Subpixel sampling from the target image
+            raw_val = sample_raw_bilinear(target_image, r, c, row_offset, col_offset)
+            # Check for saturation of the non-scaled pixel: if clipped, it carries no useful detail
+            # A value from reference image should be added anyway
+            if not is_reference and raw_val > saturation_threshold:
+                continue
+            # If the pixel is in the 'danger zone' [0.90, 0.95], we linearly reduce
+            # the long exposure's weight. This forces the accumulator to cross-fade
+            # to the short-exposure frames, preventing jagged clipping edges.
+            if not is_reference and raw_val > lower_bound:
+                fade = (saturation_threshold - raw_val) / edge_softness
+            else:
+                fade = 1.0
+            # Reference always has weight 1.0; others are scaled by SNR and the Fade ramp.
+            current_snr_w = 1.0 if is_reference else (snr_weight * fade)
+
+            # Spatial blending
+            # Combines robustness (motion), SNR (quality), and the Hann window (seams).
+            combined_weight = robustness_weight * current_snr_w * blending_window[r - row_start, c - col_start]
+
+            # Linearize and Accumulate
+            merged_accumulator[r, c] += (raw_val * exposure_scaler) * combined_weight
             weights_accumulator[r, c] += combined_weight
 
 
@@ -814,15 +936,15 @@ def merge_images(
         raise ValueError("All images in the burst must have the same shape.")
 
     if not all(metadata[0]["ExposureTime"] == mtd["ExposureTime"] for mtd in metadata[1:]):
-        logger.warning(
-            "The burst contains images with different exposures: %s. Bracketing is not yet supported."
-            % [mtd["ExposureTime"] for mtd in metadata]
+        logger.info(
+            "The burst contains images with different exposures: %s." % [mtd["ExposureTime"] for mtd in metadata]
         )
 
     if max_search_radius % 8 != 0:
         raise ValueError(f"max_search_radius should be multiple of 8, but got {max_search_radius}")
 
     # 1. Find the image with the highest sharpness
+    exposure_scalers = get_exposure_scalers(metadata)
     sharpest_image_idx = find_sharpest_image_idx(burst_images, metadata)
     # The sharpest image will be our reference, other images will be merged into it
     reference_image = burst_images[sharpest_image_idx]
@@ -878,7 +1000,9 @@ def merge_images(
     #       This ensures the spatial weights (the "window sum") are perfectly uniform across the frame.
     for img_idx in trange(len(burst_images), desc="Align&Merge (Images)", ascii=True):
         if img_idx != sharpest_image_idx:
-            target_pyramids = [get_luma_proxy(burst_images[img_idx], metadata[img_idx])]  # Level 0
+            target_pyramids = [
+                get_luma_proxy(burst_images[img_idx], metadata[img_idx]) * exposure_scalers[img_idx]
+            ]  # Level 0
             for _ in range(2):  # Level 1 and 2
                 target_pyramids.append(downsample_luma_proxy(target_pyramids[-1]))
 
@@ -896,6 +1020,7 @@ def merge_images(
                         search_radius=proxy_max_search_radius,
                         noise_scales=noise_scales,
                         noise_offsets=noise_offsets,
+                        exposure_scaler=exposure_scalers[img_idx],
                     )
                 # Merging is done on full-res image, thus size_scaler is used
                 merge_tile(
@@ -910,6 +1035,8 @@ def merge_images(
                     tile_size=tile_size,
                     blending_window=hann_window,
                     k=k_adaptive,
+                    exposure_scaler=exposure_scalers[img_idx],
+                    is_reference=(img_idx == sharpest_image_idx),
                 )
 
     # 6. Final normalization (weighted average across overlapping tiles)
