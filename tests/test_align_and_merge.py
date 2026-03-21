@@ -424,7 +424,7 @@ class TestComputeTileSAD:
     def test_perfect_match(self, proxy_pair):
         """If frames are identical and offset is 0, SAD should be 0."""
         ref, tgt = proxy_pair
-        score = _compute_tile_sad(0, 0, ref, tgt, 10, 10, 16, 1.0)
+        score = _compute_tile_sad(0, 0, ref, tgt, 10, 10, 16, 1.0, 240)
         assert score == 0.0
 
     def test_known_difference(self, proxy_pair):
@@ -438,7 +438,7 @@ class TestComputeTileSAD:
         # Expected: (10.0 * 0.5) / (no area division because it cancels out in the loop)
         # Loop sum: 16 * 16 * (10.0) = 2560
         # Normalization (2560 * 0.5) / (16 * 16) = 5.0
-        score = _compute_tile_sad(0, 0, ref, tgt, 10, 10, tile_size, inv_sigma)
+        score = _compute_tile_sad(0, 0, ref, tgt, 10, 10, tile_size, inv_sigma, 240)
         assert np.isclose(score, 5.0)
 
     def test_partial_out_of_bounds_clipping(self, proxy_pair):
@@ -449,7 +449,7 @@ class TestComputeTileSAD:
 
         # Shift so only a 5x5 area of the tile is actually on the image
         # Tile size is 16, but we start at row -11
-        score = _compute_tile_sad(-11, 0, ref, tgt, 0, 0, 16, 1.0)
+        score = _compute_tile_sad(-11, 0, ref, tgt, 0, 0, 16, 1.0, 240)
 
         # Valid rows are max(0, -(-11)) = 11 to min(16, 100+11) = 16.
         # Intersection height is 5. Width is 16.
@@ -460,7 +460,7 @@ class TestComputeTileSAD:
         """Verify None is returned when there is no intersection."""
         ref, tgt = proxy_pair
         # Shift entirely off a 100x100 image
-        score = _compute_tile_sad(200, 200, ref, tgt, 0, 0, 16, 1.0)
+        score = _compute_tile_sad(200, 200, ref, tgt, 0, 0, 16, 1.0, 240)
         assert score is None
 
     def test_translation_consistency(self):
@@ -469,13 +469,13 @@ class TestComputeTileSAD:
         tgt = np.zeros((50, 50), dtype=np.float32)
 
         # Feature at (10, 10) in ref, moved to (12, 12) in target
-        ref[10:15, 10:15] = 255.0
-        tgt[12:17, 12:17] = 255.0
+        ref[10:15, 10:15] = 235.0
+        tgt[12:17, 12:17] = 235.0
 
         # If we shift by dy=2, dx=2, the SAD should be 0
-        score_correct = _compute_tile_sad(2, 2, ref, tgt, 10, 10, 5, 1.0)
+        score_correct = _compute_tile_sad(2, 2, ref, tgt, 10, 10, 5, 1.0, 240)
         # If we don't shift, the SAD should be high
-        score_wrong = _compute_tile_sad(0, 0, ref, tgt, 10, 10, 5, 1.0)
+        score_wrong = _compute_tile_sad(0, 0, ref, tgt, 10, 10, 5, 1.0, 240)
 
         assert score_correct == 0.0
         assert score_wrong > 0.0

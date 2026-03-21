@@ -437,6 +437,7 @@ def _compute_tile_sad(
     col_start: int,
     tile_size: int,
     inv_sigma: float,
+    saturation_threshold: float = 0.95,
 ) -> float | None:
     """
     Computes the area-normalized, Variance-Weighted Sum of Absolute Differences (VW-SAD).
@@ -453,6 +454,8 @@ def _compute_tile_sad(
         col_start: Left-most coordinate of the tile in the reference frame.
         tile_size: Size (width/height) of the square tile.
         inv_sigma: Pre-calculated inverse noise floor (1/sigma) for normalization.
+        saturation_threshold: A value above this threshold is considered saturated and skipped
+            in SAD calculation
 
     Returns:
         float or None: The normalized SAD score. A value of ~1.0 indicates differences
@@ -479,15 +482,23 @@ def _compute_tile_sad(
     # Width Numba per-pixel calculation is faster
     # np.sum(np.abs(...)) leads to temporary array allocations
     sad = 0.0
+    non_clipped_count = 0
     rows, cols = ref_view.shape
     for r in range(rows):
         for c in range(cols):
-            # Direct subtraction and absolute value
-            sad += abs(ref_view[r, c] - tgt_view[r, c])
+            ref_val, tgt_val = ref_view[r, c], tgt_view[r, c]
+            # Only count pixels that are valid (not clipped) in both frames
+            if ref_val < saturation_threshold and tgt_val < saturation_threshold:
+                sad += abs(ref_val - tgt_val)
+                non_clipped_count += 1
+
+    # If 75%+ of a tile is pure white (clipped), there isn't enough texture left to determine an offset.
+    if non_clipped_count < (rows * cols) // 4:
+        return None
 
     # Normalization: If tiles are partially off-image, a smaller area will naturally have a lower SAD.
     # Divide by area to find the true best match per pixel.
-    return (sad * inv_sigma) / (rows * cols)
+    return (sad * inv_sigma) / non_clipped_count
 
 
 # ----------------------------------------- Merging functions -----------------------------------------
