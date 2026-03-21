@@ -118,19 +118,23 @@ def find_sharpest_image_idx(images: list[np.ndarray], metadata: list[dict[str, A
     if len(unique_exposures) > 1:
         logger.warning("The code is tested to work with up to 2 different exposures, but got %s" % unique_exposures)
 
+    def parse_expr(value: str) -> float:
+        if isinstance(value, str) and "/" in value:
+            numerator, denominator = value.split("/")
+            return float(numerator) / float(denominator)
+        return float(value)
+
+    # Explicitly find the short exposure group
+    exp_times = [parse_expr(mtd["ExposureTime"]) for mtd in metadata]
+    min_exp = min(exp_times)
+
+    # Only consider frames within 1% of the minimum exposure time
+    short_indices = [i for i, t in enumerate(exp_times) if abs(t - min_exp) < (min_exp * 0.01)]
+
     kernel = np.array([[0, 1, 0], [1, -4, 1], [0, 1, 0]], dtype=np.float32)  # Simple 3x3 Laplacian kernel
-
-    # Identify the "short" exposure group (the most frequent one)
-    # This ensures we pick the best from the 'standard' frames
-    # TODO (andrei aksionau): ensure that we are searching only from the short exposure images
-    exp_times = [mtd["ExposureTime"] for mtd in metadata]
-    most_common_exp = max(set(exp_times), key=exp_times.count)
-
     scores = []
-    for idx in range(len(images)):
-        # Only consider frames from the majority exposure group to avoid brightness-bias in the Laplacian variance
-        if metadata[idx]["ExposureTime"] != most_common_exp:
-            continue
+
+    for idx in short_indices:
         # 1. Recalculate on-the-go to reduce memory footprint
         luma_proxy = get_luma_proxy(images[idx], metadata[idx])
         # 2. Light blur to suppress high-frequency noise that mimics sharpness
@@ -140,10 +144,12 @@ def find_sharpest_image_idx(images: list[np.ndarray], metadata: list[dict[str, A
         scores.append((idx, convolve(smoothed, kernel).var()))
 
     best_idx, best_score = max(scores, key=lambda x: x[1])
+
+    # Calculate average only of the short group for a meaningful 'improvement' metric
     avg_score = sum(s[1] for s in scores) / len(scores)
     improvement = (best_score / (avg_score + 1e-9) - 1) * 100
 
-    logger.info(f"Lucky Imaging: Selected frame `{best_idx}` ({improvement:+.1f}% sharper than burst average)")
+    logger.info(f"Lucky Imaging: Selected frame `{best_idx}` ({improvement:+.1f}% sharper than short-exposure avg)")
     return best_idx
 
 
@@ -799,7 +805,7 @@ def merge_tile(
     # In linear space, SNR is proportional to exposure time. We weight the long
     # exposure frame higher (e.g., if 4x longer, it gets 4x weight) so it dominates
     # the shadow/midtone average, significantly reducing visible noise.
-    snr_weight = 1.0 / exposure_scaler
+    snr_weight = 1.0 / max(exposure_scaler, 1e-5)
 
     # 3. Transition parameters
     # We want to use the 'clean' long exposure as late as possible.
