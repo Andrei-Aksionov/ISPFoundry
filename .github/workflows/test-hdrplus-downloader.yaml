@@ -11,7 +11,7 @@ on:
     paths: *shared_paths
 
 jobs:
-  download-and-test:
+  dataset_downloader_test:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:

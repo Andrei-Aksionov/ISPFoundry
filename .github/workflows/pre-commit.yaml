@@ -6,7 +6,7 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  pre-commit:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -28,7 +28,25 @@ jobs:
       - name: Install Python dependencies via uv sync
         run: uv sync
 
+      - name: Install Lychee (Latest Release)
+        run: |
+          # Query GitHub API for the latest release tag
+          LATEST_TAG=$(curl -s https://api.github.com/repos/lycheeverse/lychee/releases/latest | jq -r .tag_name)
+          echo "Installing Lychee version: $LATEST_TAG"
+
+          URL="https://github.com/lycheeverse/lychee/releases/download/${LATEST_TAG}/lychee-x86_64-unknown-linux-gnu.tar.gz"
+
+          # Load the archive, extract into temp folder, move the binary, delete the rest
+          mkdir -p lychee_install
+          curl -sLO "$URL"
+          tar -xzf "lychee-x86_64-unknown-linux-gnu.tar.gz" -C lychee_install
+          sudo mv lychee_install/lychee /usr/local/bin/
+          rm -rf lychee_install "lychee-x86_64-unknown-linux-gnu.tar.gz"
+
+          # Verify installation
+          echo "Installed Lychee version: $(lychee --version)"
+
       - name: Run pre-commit
-        uses: pre-commit/action@v3.0.0
-        with:
-          extra_args: '--all-files'
+        run: uv run pre-commit run --all-files --show-diff-on-failure
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
