@@ -77,4 +77,4 @@ repos:
         - "--max-retries=5"
         - "--retry-wait-time=10"
         - "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-      types_or: [markdown, python]
+      types_or: [markdown, python, jupyter]
