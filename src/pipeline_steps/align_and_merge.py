@@ -338,6 +338,9 @@ def get_hann_window_2d(tile_size: int) -> np.ndarray:
     return np.outer(w_1d, w_1d).astype(np.float32)
 
 
+# ---------------------------------------- Utility functions -----------------------------------------
+
+
 @njit(fastmath=True)
 def find_subpixel_shift(grid: np.ndarray) -> tuple[float, float]:
     """
@@ -385,86 +388,6 @@ def find_subpixel_shift(grid: np.ndarray) -> tuple[float, float]:
     offset_c = max(-0.5, min(0.5, offset_col))
 
     return float(offset_r), float(offset_c)
-
-
-@njit(fastmath=True)
-def sample_raw_bilinear(
-    raw_image: np.ndarray, row_base: int, col_base: int, row_offset: float, col_offset: float
-) -> np.float32:
-    """
-    Performs sub-pixel sampling on Bayer RAW data while preserving color integrity.
-
-    In a Bayer sensor, adjacent pixels are different colors (e.g., Red next to Green).
-    Standard bilinear interpolation would mix these colors, causing severe artifacts.
-    This function "jumps" with a 2-pixel stride to ensure it only interpolates
-    between pixels of the same color phase.
-
-    Sub-pixel Logic Examples:
-    -------------------------
-    - Shift = 0.4: Interpolates between phase 0 and phase 2.
-    - Shift = 1.0: Interpolates exactly 50/50 between phase 0 and phase 2.
-    - Shift = 1.8: Interpolates heavily toward phase 2.
-    - Shift = 2.0: Triggers the "Fast Path" and takes the pixel at index 2 directly.
-
-    Args:
-        raw_image: The 2D sensor data array (H, W).
-        row_base: The integer row index in the reference frame.
-        col_base: The integer column index in the reference frame.
-        row_offset: The vertical shift to apply (can be fractional).
-        col_offset: The horizontal shift to apply (can be fractional).
-
-    Returns:
-        np.float32: The color-accurate interpolated pixel value.
-
-    """
-
-    height, width = raw_image.shape
-
-    # 1. Fast Path: If the offset is exactly a multiple of 2, we are aligned
-    # perfectly with a Bayer pixel of the same color. We skip math to avoid blur.
-    r_off_int, c_off_int = round(row_offset), round(col_offset)
-    is_integer_shift = abs(row_offset - r_off_int) < 1e-5 and abs(col_offset - c_off_int) < 1e-5
-
-    if is_integer_shift and (r_off_int % 2 == 0) and (c_off_int % 2 == 0):
-        # Direct access to the same-color pixel
-        return np.float32(raw_image[row_base + r_off_int, col_base + c_off_int])
-
-    # 2. Identify the "sampling quad": the 4 nearest pixels of the same color.
-    # To keep the Bayer phase, we move in steps of 2 pixels.
-    # We find the top-left neighbor by flooring the offset to the nearest even number.
-    row_shift_base = int(np.floor(row_offset / 2.0) * 2)
-    col_shift_base = int(np.floor(col_offset / 2.0) * 2)
-
-    # Coordinates for the 2x2 same-color grid
-    row_top = row_base + row_shift_base
-    col_left = col_base + col_shift_base
-    # Stay in bounds while maintaining Bayer phase
-    row_bottom = row_top + 2 if row_top + 2 < height else row_top
-    col_right = col_left + 2 if col_left + 2 < width else col_left
-
-    # 3. Boundary Guard: If the 2-pixel stride goes off-sensor,
-    # we clamp to the base pixel to prevent crashes and maintain parity.
-    row_top = max(0, min(row_top, height - 1))
-    row_bottom = max(0, min(row_bottom, height - 1))
-
-    # 4. Calculate fractional distances [0.0, 1.0] within the 2-pixel gap.
-    # Example: if row_offset is 0.5, row_lerp is 0.25 (a quarter of the 2-pixel jump).
-    row_lerp = (row_offset - row_shift_base) / 2.0
-    col_lerp = (col_offset - col_shift_base) / 2.0
-
-    # 5. Fetch the 4 same-color neighbors
-    top_left = raw_image[row_top, col_left]
-    top_right = raw_image[row_top, col_right]
-    bottom_left = raw_image[row_bottom, col_left]
-    bottom_right = raw_image[row_bottom, col_right]
-
-    # 6. Bilinear Interpolation (Standard Lerp)
-    # Interpolate horizontally across the top and bottom pairs
-    top_mix = top_left + col_lerp * (top_right - top_left)
-    bottom_mix = bottom_left + col_lerp * (bottom_right - bottom_left)
-
-    # Interpolate vertically between the two horizontal results
-    return np.float32(top_mix + row_lerp * (bottom_mix - top_mix))
 
 
 @njit(fastmath=True)
@@ -541,7 +464,7 @@ def _compute_tile_sad(
     return (sad * inv_sigma) / non_clipped_count
 
 
-# ----------------------------------------- Merging functions -----------------------------------------
+# ---------------------------------------- Aligning functions ----------------------------------------
 
 
 @njit(fastmath=True)
@@ -773,6 +696,89 @@ def find_best_offset_pyramids(
         search_radius=1,
         inv_sigma=inv_sigma,
     )
+
+
+# ----------------------------------------- Merging functions -----------------------------------------
+
+
+@njit(fastmath=True)
+def sample_raw_bilinear(
+    raw_image: np.ndarray, row_base: int, col_base: int, row_offset: float, col_offset: float
+) -> np.float32:
+    """
+    Performs sub-pixel sampling on Bayer RAW data while preserving color integrity.
+
+    In a Bayer sensor, adjacent pixels are different colors (e.g., Red next to Green).
+    Standard bilinear interpolation would mix these colors, causing severe artifacts.
+    This function "jumps" with a 2-pixel stride to ensure it only interpolates
+    between pixels of the same color phase.
+
+    Sub-pixel Logic Examples:
+    -------------------------
+    - Shift = 0.4: Interpolates between phase 0 and phase 2.
+    - Shift = 1.0: Interpolates exactly 50/50 between phase 0 and phase 2.
+    - Shift = 1.8: Interpolates heavily toward phase 2.
+    - Shift = 2.0: Triggers the "Fast Path" and takes the pixel at index 2 directly.
+
+    Args:
+        raw_image: The 2D sensor data array (H, W).
+        row_base: The integer row index in the reference frame.
+        col_base: The integer column index in the reference frame.
+        row_offset: The vertical shift to apply (can be fractional).
+        col_offset: The horizontal shift to apply (can be fractional).
+
+    Returns:
+        np.float32: The color-accurate interpolated pixel value.
+
+    """
+
+    height, width = raw_image.shape
+
+    # 1. Fast Path: If the offset is exactly a multiple of 2, we are aligned
+    # perfectly with a Bayer pixel of the same color. We skip math to avoid blur.
+    r_off_int, c_off_int = round(row_offset), round(col_offset)
+    is_integer_shift = abs(row_offset - r_off_int) < 1e-5 and abs(col_offset - c_off_int) < 1e-5
+
+    if is_integer_shift and (r_off_int % 2 == 0) and (c_off_int % 2 == 0):
+        # Direct access to the same-color pixel
+        return np.float32(raw_image[row_base + r_off_int, col_base + c_off_int])
+
+    # 2. Identify the "sampling quad": the 4 nearest pixels of the same color.
+    # To keep the Bayer phase, we move in steps of 2 pixels.
+    # We find the top-left neighbor by flooring the offset to the nearest even number.
+    row_shift_base = int(np.floor(row_offset / 2.0) * 2)
+    col_shift_base = int(np.floor(col_offset / 2.0) * 2)
+
+    # Coordinates for the 2x2 same-color grid
+    row_top = row_base + row_shift_base
+    col_left = col_base + col_shift_base
+    # Stay in bounds while maintaining Bayer phase
+    row_bottom = row_top + 2 if row_top + 2 < height else row_top
+    col_right = col_left + 2 if col_left + 2 < width else col_left
+
+    # 3. Boundary Guard: If the 2-pixel stride goes off-sensor,
+    # we clamp to the base pixel to prevent crashes and maintain parity.
+    row_top = max(0, min(row_top, height - 1))
+    row_bottom = max(0, min(row_bottom, height - 1))
+
+    # 4. Calculate fractional distances [0.0, 1.0] within the 2-pixel gap.
+    # Example: if row_offset is 0.5, row_lerp is 0.25 (a quarter of the 2-pixel jump).
+    row_lerp = (row_offset - row_shift_base) / 2.0
+    col_lerp = (col_offset - col_shift_base) / 2.0
+
+    # 5. Fetch the 4 same-color neighbors
+    top_left = raw_image[row_top, col_left]
+    top_right = raw_image[row_top, col_right]
+    bottom_left = raw_image[row_bottom, col_left]
+    bottom_right = raw_image[row_bottom, col_right]
+
+    # 6. Bilinear Interpolation (Standard Lerp)
+    # Interpolate horizontally across the top and bottom pairs
+    top_mix = top_left + col_lerp * (top_right - top_left)
+    bottom_mix = bottom_left + col_lerp * (bottom_right - bottom_left)
+
+    # Interpolate vertically between the two horizontal results
+    return np.float32(top_mix + row_lerp * (bottom_mix - top_mix))
 
 
 @njit(fastmath=True)
