@@ -9,7 +9,7 @@ from tqdm import trange
 
 from base import ISPStep, register_step
 
-# ---------------------------------------- Utility functions -----------------------------------------
+# --------------------------------- Luma Proxy & Exposure Functions ----------------------------------
 
 
 def get_luma_proxy(raw_image: np.ndarray, metadata: dict[str, Any]) -> np.ndarray:
@@ -120,56 +120,50 @@ def get_exposure_scalers(metadata: list[dict[str, Any]]) -> np.ndarray:
 
 def find_sharpest_image_idx(images: list[np.ndarray], metadata: list[dict[str, Any]]) -> int:
     """
-    Identifies the sharpest frame in a burst to serve as the alignment base.
+    Selects the optimal reference frame from the burst using a 'Lucky Imaging' approach.
 
-    This 'Lucky Imaging' selection helps minimize the propagation of motion blur
-    through the pipeline. It uses a Noise-Robust Laplacian Variance method:
-    1. Generates a luma proxy for each frame.
-    2. Applies a light Gaussian blur (sigma=0.5) to prevent sensor noise from
-       being misidentified as sharp edge detail.
-    3. Convolves with a Laplacian kernel and calculates variance to estimate
-       high-frequency content (edge strength).
+    The selection is restricted to short-exposure frames to ensure the alignment base
+    is free from motion blur. Sharpness is estimated using the variance of the
+    Laplacian on a smoothed luma proxy (essentially a Laplacian of Gaussian operator).
+
+    Mathematical note:
+    The variance of the Laplacian acts as a proxy for the high-frequency energy in the image.
+    A higher variance correlates with steeper edge gradients and less defocus or motion blur.
 
     Args:
-        images: List of Bayer RAW images (H, W).
-        metadata: List of per-frame metadata dictionaries.
+        images: List of Bayer RAW images in [0, 1] range.
+        metadata: List of metadata dicts containing 'ExposureTime' and CFA info.
 
     Returns:
-        int: The index of the frame with the highest relative sharpness.
+        int: Index of the sharpest short-exposure frame.
 
     """
-    unique_exposures = {mtd["ExposureTime"] for mtd in metadata}
-    if len(unique_exposures) > 1:
-        logger.warning("The code is tested to work with up to 2 different exposures, but got %s" % unique_exposures)
 
-    def parse_expr(value: str) -> float:
-        if isinstance(value, str) and "/" in value:
-            numerator, denominator = value.split("/")
-            return float(numerator) / float(denominator)
-        return float(value)
+    # Identify frames with the shortest exposure (scale factor of 1.0)
+    # Ignore long-exposures as they are prone to motion blur.
+    exposure_scalers = get_exposure_scalers(metadata)
+    short_exposure_indices = np.where(np.isclose(exposure_scalers, 1.0))[0]
 
-    # Explicitly find the short exposure group
-    exp_times = [parse_expr(mtd["ExposureTime"]) for mtd in metadata]
-    min_exp = min(exp_times)
+    if len(short_exposure_indices) == 0:
+        logger.warning("No short-exposure frames found; falling back to all frames.")
+        short_exposure_indices = np.arange(len(images))
 
-    # Only consider frames within 1% of the minimum exposure time
-    short_indices = [i for i, t in enumerate(exp_times) if abs(t - min_exp) < (min_exp * 0.01)]
-
-    kernel = np.array([[0, 1, 0], [1, -4, 1], [0, 1, 0]], dtype=np.float32)  # Simple 3x3 Laplacian kernel
+    # Standard 3x3 discrete Laplacian kernel
+    kernel = np.array([[0, 1, 0], [1, -4, 1], [0, 1, 0]], dtype=np.float32)
     scores = []
 
-    for idx in short_indices:
+    for idx in short_exposure_indices:
         # 1. Recalculate on-the-go to reduce memory footprint
         luma_proxy = get_luma_proxy(images[idx], metadata[idx])
-        # 2. Light blur to suppress high-frequency noise that mimics sharpness
+        # 2. Light blur to suppress high-frequency noise that mimics sharpness.
         # This ensures we measure actual structural edges, not sensor grain.
         smoothed = gaussian_filter(luma_proxy, sigma=0.5)
-        # 3. Calculate Laplacian variance
+        # 3. Calculate the Laplacian variance (structural edge strength)
         scores.append((idx, convolve(smoothed, kernel).var()))
 
     best_idx, best_score = max(scores, key=lambda x: x[1])
 
-    # Calculate average only of the short group for a meaningful 'improvement' metric
+    # Contextual logging for pipeline transparency
     avg_score = sum(s[1] for s in scores) / len(scores)
     improvement = (best_score / (avg_score + 1e-9) - 1) * 100
 
@@ -177,9 +171,10 @@ def find_sharpest_image_idx(images: list[np.ndarray], metadata: list[dict[str, A
     return best_idx
 
 
-def get_noise_params_2x2(
-    burst_images: list[np.ndarray], metadata: list[dict[str, Any]]
-) -> tuple[np.ndarray, np.ndarray]:
+# ------------------------------------ Noise Estimation Functions ------------------------------------
+
+
+def get_noise_profile(image: np.ndarray, metadata: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
     """
     Parses the NoiseProfile from metadata into 2x2 grids aligned with the Bayer pattern.
 
@@ -191,9 +186,8 @@ def get_noise_params_2x2(
     estimation performed on the reference frame.
 
     Args:
-        burst_images: A list of RAW images (2D numpy arrays).
-        metadata: A list of metadata dictionaries for the burst. Only the first
-            entry is used for the profile, but all are checked for consistency.
+        image: A RAW image (2D numpy array).
+        metadata: A dictionary containing per-frame sensor information (e.g., exposure time, black level).
 
     Returns:
         tuple[np.ndarray, np.ndarray]:
@@ -206,29 +200,21 @@ def get_noise_params_2x2(
 
     """
 
-    if "NoiseProfile" in metadata[0] and not all(
-        metadata[0]["NoiseProfile"] == mtd["NoiseProfile"] for mtd in metadata
-    ):
-        logger.warning(
-            "Images in the burst have different NoiseProfile which means that shots were taken "
-            "with different parameters. Merging multi-exposure frames is not yet supported/tested."
+    if "CFAPlaneColor" in metadata and metadata["CFAPlaneColor"] != "Red,Green,Blue":
+        raise ValueError(
+            f"The code expects that the matrix layout is Red Green Blue, but got {metadata['CFAPlaneColor']}"
         )
-    ref_image = burst_images[0]
-    mtd = metadata[0]
-
-    if "CFAPlaneColor" in mtd and mtd["CFAPlaneColor"] != "Red,Green,Blue":
-        raise ValueError(f"The code expects that the matrix layout is Red Green Blue, but got {mtd['CFAPlaneColor']}")
 
     # Case A: Use DNG-standard NoiseProfile if available
-    if "NoiseProfile" in mtd:
-        noise_profile = [float(x) for x in mtd["NoiseProfile"].split()]
+    if "NoiseProfile" in metadata:
+        noise_profile = [float(x) for x in metadata["NoiseProfile"].split()]
         color_map = {}
         # NoiseProfile contains 6 values: 3 pairs of Scale and Offset for each color
         for idx, color_name in enumerate(("R", "G", "B")):
             color_map[color_name] = (noise_profile[idx * 2], noise_profile[idx * 2 + 1])
 
-        desc = mtd["color_desc"]  # e.g., "RGBG"
-        pattern = mtd["raw_pattern"]  # e.g., [[2, 3], [1, 0]]
+        desc = metadata["color_desc"]  # e.g., "RGBG"
+        pattern = metadata["raw_pattern"]  # e.g., [[2, 3], [1, 0]]
 
         # Create 2x2 grids for G and C
         scales_grid = np.array([[color_map[desc[idx]][0] for idx in row] for row in pattern], dtype=np.float32)
@@ -237,8 +223,10 @@ def get_noise_params_2x2(
         return scales_grid, offsets_grid
 
     # Case B: Fallback to empirical estimation
-    logger.warning("NoiseProfile missing for %s. Estimating noise from reference frame." % mtd.get("Model", "Unknown"))
-    return estimate_noise_profile(ref_image)
+    logger.warning(
+        "NoiseProfile missing for %s. Estimating noise from reference frame." % metadata.get("Model", "Unknown")
+    )
+    return estimate_noise_profile(image)
 
 
 def estimate_noise_profile(image: np.ndarray, patch_size: int = 8) -> tuple[np.ndarray, np.ndarray]:
@@ -314,7 +302,7 @@ def estimate_noise_profile(image: np.ndarray, patch_size: int = 8) -> tuple[np.n
     return scales_grid, offsets_grid
 
 
-# ---------------------------------------- Aligning functions ----------------------------------------
+# ---------------------------------------- Aligning Functions ----------------------------------------
 
 
 @njit(fastmath=True)
@@ -367,7 +355,7 @@ def find_subpixel_shift(grid: np.ndarray) -> tuple[float, float]:
 
 
 @njit(fastmath=True)
-def _compute_tile_sad(
+def compute_tile_sad(
     row_offset: int,
     col_offset: int,
     reference_proxy: np.ndarray,
@@ -478,7 +466,7 @@ def find_best_integer_offset(
     for dy in range(hint_dy - search_radius, hint_dy + search_radius + 1):
         for dx in range(hint_dx - search_radius, hint_dx + search_radius + 1):
             # _compute_tile_sad handles boundary checks and returns None if out of bounds
-            sad = _compute_tile_sad(dy, dx, reference_proxy, target_proxy, row_start, col_start, tile_size, inv_sigma)
+            sad = compute_tile_sad(dy, dx, reference_proxy, target_proxy, row_start, col_start, tile_size, inv_sigma)
             sad = 1e20 if (sad is None) else sad
             if sad < min_sad:
                 min_sad = sad
@@ -488,7 +476,7 @@ def find_best_integer_offset(
 
 
 @njit(fastmath=True)
-def find_best_offset_float(
+def find_best_float_offset(
     reference_proxy: np.ndarray,
     target_proxy: np.ndarray,
     row_start: int,
@@ -502,24 +490,33 @@ def find_best_offset_float(
     """
     Refines a coarse integer shift into a sub-pixel translation using quadratic fitting.
 
-    This is the final step of the pyramid search, operating on the highest-resolution proxy.
-    It performs a narrow integer search followed by a 2D parabolic fit on the SAD surface.
+    This is the final step of the alignment pyramid. It analyzes the neighborhood
+    of the best integer match to estimate the 'true' minimum of the error surface
+    at a sub-pixel level.
+
+    The refinement assumes the SAD (Sum of Absolute Differences) surface behaves
+    locally like a 2D parabola. By finding the vertex of this parabola, we can
+    achieve alignment precision significantly higher than the pixel grid.
 
     Args:
-        reference_proxy: Level 0 (highest resolution) grayscale proxy.
-        target_proxy: Level 0 grayscale target image.
-        row_start: Top row index of the tile in Level 0 pixels.
-        col_start: Left column index of the tile in Level 0 pixels.
+        reference_proxy: Highest resolution grayscale proxy.
+        target_proxy: Highest resolution target image proxy.
+        row_start: Top row index of the tile.
+        col_start: Left column index of the tile.
         tile_size: Size of the tile in pixels.
-        inv_sigma: Noise-normalization factor.
+        best_dy_int: Best integer vertical shift found in previous steps.
+        best_dx_int: Best integer horizontal shift found in previous steps.
+        min_sad: The SAD score associated with the best integer shift.
+        inv_sigma: Noise-normalization factor (1 / noise_std).
 
     Returns:
-        tuple: (subpixel_dy, subpixel_dx, normalized_sad_score)
+        tuple: (refined_dy, refined_dx, normalized_sad_score)
 
     """
 
-    # --- 1. Sub-pixel Refinement within 3x3 neighborhood ---
-    # Centered on the best integer offset to calculate the surface curvature
+    # --- 1. Neighborhood Sampling ---
+    # Build a 3x3 'Error Surface' grid centered on our best integer match.
+    # This grid provides the curvature data needed to fit the parabola.
     neighborhood = np.zeros((3, 3), dtype=np.float32)
     neighborhood[1, 1] = min_sad
 
@@ -528,18 +525,21 @@ def find_best_offset_float(
 
     for offset_row, offset_col in cross_offsets:
         dy, dx = best_dy_int + offset_row, best_dx_int + offset_col
-        sad = _compute_tile_sad(dy, dx, reference_proxy, target_proxy, row_start, col_start, tile_size, inv_sigma)
-        # Use -1 as a sentinel for tiles that fall off the image sensor boundary
+        sad = compute_tile_sad(dy, dx, reference_proxy, target_proxy, row_start, col_start, tile_size, inv_sigma)
+        # Use -1.0 as a sentinel if the search shift goes outside image boundaries
         neighborhood[offset_row + 1, offset_col + 1] = -1 if (sad is None) else sad
 
-    # --- 2. Boundary Fallback ---
-    # If a neighbor is off-screen, mirror the SAD value from the opposite side
-    # to allow the parabola to still be calculated.
+    # --- 2. Boundary Fallback (Symmetric Mirroring) ---
+    # If a neighbor is off-sensor (sentinel -1), mirror the SAD value from
+    # the opposite side. This ensures the quadratic solver has enough points
+    # to calculate a stable curvature even at the edges of the frame.
     for i, j in cross_offsets:
         row_idx, col_idx = i + 1, j + 1
         if neighborhood[row_idx, col_idx] < 0:
             # Find the opposite neighbor's value
             opp_val = neighborhood[1 - i, 1 - j]
+            # Take the max of the opposite and the center to ensure the
+            # parabola remains 'convex' (pointing up), preventing wild offsets
             neighborhood[row_idx, col_idx] = max(opp_val, min_sad)
 
     # --- 3. Sub-pixel Parabola Fitting ---
@@ -550,10 +550,10 @@ def find_best_offset_float(
 
 
 @njit(fastmath=True)
-def find_best_offset_pyramids(
+def find_best_offset(
     reference_pyramids: list[np.ndarray],
     target_pyramids: list[np.ndarray],
-    row_start: int,  # Coordinates at Level 0
+    row_start: int,
     col_start: int,
     tile_size: int,
     search_radius: int,
@@ -562,82 +562,86 @@ def find_best_offset_pyramids(
     exposure_scaler: float,
 ) -> tuple[float, float, float]:
     """
-    Performs hierarchical motion estimation across a 3-level image pyramid.
+    Performs hierarchical motion estimation across a multi-level image pyramid.
 
-    This function implements a coarse-to-fine search:
-    1. Level 2 (1/4 proxy scale): Finds large-scale motion with a wide search.
-    2. Level 1 (1/2 proxy scale): Refines the previous guess in a narrow window.
-    3. Level 0 (Full proxy scale): Final sub-pixel refinement via find_best_offset_final.
+    This function uses a coarse-to-fine strategy to estimate tile displacement:
+    1. Coarsest Level: Wide-area search to capture large global or local motion.
+    2. Intermediate Levels: Refines the search in a narrow window around the
+       previous level's best guess.
+    3. Finest Level (Level 0): Final integer search followed by sub-pixel refinement.
+
+    The search is noise-aware; SAD scores are normalized by the local noise floor to ensure that
+    alignment remains robust in dark, noisy regions without over-fitting to sensor grain.
 
     Args:
-        reference_pyramids: List of [Level0, Level1, Level2] reference images.
-        target_pyramids: List of [Level0, Level1, Level2] target images.
-        row_start: Top row index of the tile in Level 0 pixels (highest resolution).
-        col_start: Left column index of the tile in Level 0 pixels (highest resolution).
+        reference_pyramids: List of proxies from highest to lowest resolution.
+        target_pyramids: List of target proxies from highest to lowest resolution.
+        row_start: Top row index of the tile at Level 0 (highest resolution).
+        col_start: Left column index of the tile at Level 0(highest resolution).
         tile_size: Pixel size of tiles (constant across levels).
-        search_radius: Max search distance in proxy pixels at Level 0.
-        noise_scales: 2x2 matrix of shot noises per-channel
-        noise_offsets: 2x2 matrix of matrix read noise per-channel
-        exposure_scaler: Normalization factor w.r.t. to exposure of the reference frame.
+        search_radius: Maximum search distance in pixels at Level 0.
+        noise_scales: Gain-dependent shot noise parameters.
+        noise_offsets: Read noise parameters.
+        exposure_scaler: Ratio of reference exposure to target exposure.
 
     Returns:
-        tuple: (final_dy, final_dx, final_sad_score)
+        tuple: (final_dy, final_dx, min_sad_score)
 
     """
 
-    # --- 1. Noise Floor & Normalization Setup ---
-
-    # We calculate the noise floor based on Level 0 luma mean.
+    # --- 1. Noise Floor Estimation ---
+    # Estimate the noise floor once at the highest resolution to guide the whole hierarchical search.
     ref_tile = reference_pyramids[0][row_start : row_start + tile_size, col_start : col_start + tile_size]
     tile_mean = np.mean(ref_tile)
 
-    # Average noise parameters (G and B channels usually share similar noise)
     avg_scale = np.mean(noise_scales)
     avg_offset = np.mean(noise_offsets)
 
     # Statistical correction: averaging RGGB into Luma reduces variance by ~4x.
-    # Must account for this so the SAD (from proxy) matches the Noise Model
+    # Must account for this so the SAD (from proxy) matches the Noise Model.
     # Since luma proxy weighs greens more, the actual value is
     # 0.15**2 + 0.35**2 + 0.35**2 + 0.15**2 = 0.29
     proxy_variance_scale = 0.29
 
-    # Variance of Reference: Var_ref = g*x + c
-    # Variance of Target (Scaled): Var_tgt = (scaler^2) * (g*(x/scaler) + c)
-    #                                      = scaler*g*x + (scaler^2)*c
-    # Total Variance = Var_ref + Var_tgt
+    # Model the variance for both frames.
+    # Note: Target variance accounts for the exposure scaling factor.
     var_ref = avg_scale * tile_mean + avg_offset
     var_tgt = (exposure_scaler * avg_scale * tile_mean) + (exposure_scaler**2 * avg_offset)
 
-    # Given the NoiseProfile from the metadata, the noise model is: sigma^2 = g * x + c
+    # Calculate the inverse of the standard deviation (1 / sigma)
     sigma_sq = max(1e-9, var_ref + var_tgt) * proxy_variance_scale
     inv_sigma = 1.0 / (np.sqrt(sigma_sq) + 1e-8)
 
-    # # --- 2. Coarsest Level (Level 2: 1/4 of Proxy) ---
-    # # Search radius is scaled down. A 1px shift here = 4px at Level 0.
-    #
-    # # --- 3. Middle Level (Level 1: 1/2 of Proxy) ---
-    # # Multiply coarsest shift by 2 to align with Level 1 scale.
-    #
-    # # --- 4. Level 0 (Highest Res Proxy) ---
+    # --- 2. Hierarchical Integer Search ---
+    # Level 2 (1/4 of Proxy) --> Level 1 (1/2 of Proxy) --> Level 0 (Proxy)
     best_dy_int = best_dx_int = 0
-    proxy_scaler = 4
+    num_levels = len(reference_pyramids)
+    proxy_scaler = 2 ** (num_levels - 1)
     for idx in range(len(reference_pyramids)):
+        # We iterate from the coarsest level (last in list) to the finest (first in list)
+        level_ref = reference_pyramids[num_levels - 1 - idx]
+        level_tgt = target_pyramids[num_levels - 1 - idx]
+
+        # Wide search at the coarsest level, narrow refinement thereafter
+        level_search_radius = search_radius // proxy_scaler if idx == 0 else 1
+
         best_dy_int, best_dx_int, min_sad = find_best_integer_offset(
-            reference_proxy=reference_pyramids[-1 - idx],
-            target_proxy=target_pyramids[-1 - idx],
+            reference_proxy=level_ref,
+            target_proxy=level_tgt,
             row_start=row_start // proxy_scaler,
             col_start=col_start // proxy_scaler,
             tile_size=tile_size,
-            hint_dy=best_dy_int * 2,
+            hint_dy=best_dy_int * 2,  # Scale previous level's shift up to current scale
             hint_dx=best_dx_int * 2,
-            search_radius=search_radius // 4 if idx == 0 else 1,
+            search_radius=level_search_radius,
             inv_sigma=inv_sigma,
         )
+        # Prepare scaler for the next (finer) level
         proxy_scaler //= 2
 
-    # --- 5. Level 0 (Highest Res Proxy) ---
-    # Final refinement with sub-pixel interpolation.
-    return find_best_offset_float(
+    # --- 3. Final Sub-pixel Refinement ---
+    # After finding the best integer match at the highest resolution (Level 0) find the sub-pixel peak.
+    return find_best_float_offset(
         reference_proxy=reference_pyramids[0],
         target_proxy=target_pyramids[0],
         row_start=row_start,
@@ -650,7 +654,7 @@ def find_best_offset_pyramids(
     )
 
 
-# ----------------------------------------- Merging functions -----------------------------------------
+# ----------------------------------------- Merging Functions -----------------------------------------
 
 
 def get_hann_window_2d(tile_size: int) -> np.ndarray:
@@ -775,43 +779,35 @@ def merge_tile(
     is_reference: bool = False,
 ) -> None:
     """
-    Performs SNR-prioritized weighted merging of a tile into the final image buffers.
+    Merges a single aligned tile into the global image buffers using SNR-aware weighting.
 
-    This function integrates three distinct weighting components to produce a
-    high-dynamic-range, denoised result:
-    1. **Temporal Robustness:** Uses an exponential SAD-based weight to reject
-       misaligned or moving pixels (ghosting prevention).
-    2. **SNR Priority:** Uses the exposure ratio to prioritize cleaner (long-exposure)
-       pixels in shadows/midtones.
-    3. **Spatial Blending:** Uses a 2D window (e.g., Hann) to eliminate tile seams.
+    The merging process uses three independent weighting components:
+    1. Temporal Robustness: An exponential weight based on the alignment SAD score
+       to reject motion blur or occlusions (ghosting prevention).
+    2. SNR Priority: Weights frames by their relative exposure time to prioritize
+       cleaner, long-exposure data in shadows and midtones.
+    3. Spatial Blending: Applies a 2D Hann window to the tile to prevent visible
+       seams at tile boundaries.
 
-    It also implements a soft-thresholding roll-off to transition away from
-    long-exposure pixels as they approach the saturation point.
+    It also implements a 'soft-clipping' transition. As pixels in long-exposure
+    frames approach the saturation point, their weight is gradually tapered off,
+    allowing the short-exposure (non-clipped) frames to take over seamlessly.
 
     Args:
-        merged_accumulator: The full-res buffer accumulating weighted pixel values (H, W).
-        weights_accumulator: The full-res buffer accumulating weights for normalization (H, W).
-        target_image: The image to be merged to the reference one (H, W).
-        row_start: Top row index of the tile in full-res coordinates.
-        col_start: Left column index of the tile in full-res coordinates.
-        row_offset: Offset in row/y/height direction for the target image's tile.
-        col_offset: Offset in col/x/width direction for the target image's tile.
-        sad_score: SAD value from the proxy alignment step.
-        tile_size: The width/height of the tile in full-res pixels.
-        blending_window :
-            A 2D weight map (e.g., Hann or Gaussian) applied to each tile to
-            taper edges and ensure seamless transitions between overlapping
-            regions. Should match the tile dimensions.
-        k:
-           - High k (4.0 - 12.0): Promotes temporal averaging (ideal for high-ISO denoising).
-           - Low k (0.5 - 1.0): Promotes frame rejection (ideal for sharp motion/ghosting).
-        exposure_scaler (float): The ratio (Reference_Exp / Target_Exp).
-            Used to linearize brightness and derive the SNR weight.
-        saturation_threshold (float, optional): The RAW value beyond which
-            pixels are considered clipped. Defaults to 0.95.
-        is_reference (bool, optional): If True, treats this as the anchor frame.
-            The reference frame bypasses SNR/Fade weighting and saturation
-            rejection to ensure a complete base image. Defaults to False.
+        merged_accumulator: Buffer for weighted pixel sums [H, W].
+        weights_accumulator: Buffer for total weights [H, W].
+        target_image: The RAW image being merged.
+        row_start: Top row index of the tile in the reference frame.
+        col_start: Left column index of the tile in the reference frame.
+        row_offset: The calculated sub-pixel shift in row direction for this tile.
+        col_offset: The calculated sub-pixel shift in column direction for this tile.
+        sad_score: The noise-normalized alignment error.
+        tile_size: The pixel dimension of the tile.
+        blending_window: 2D array (e.g., Hann) for spatial feathering.
+        k: Sensitivity factor for robustness (higher k = more averaging).
+        exposure_scaler: Ratio of (Reference Exposure / Target Exposure).
+        saturation_threshold: RAW value [0, 1] where sensors clip.
+        is_reference: If True, bypasses robustness and saturation checks.
 
     """
 
@@ -830,14 +826,15 @@ def merge_tile(
     # the shadow/midtone average, significantly reducing visible noise.
     snr_weight = 1.0 / max(exposure_scaler, 1e-5)
 
-    # 3. Transition parameters
-    # We want to use the 'clean' long exposure as late as possible.
+    # 3. Saturation Roll-off Parameters
+    # Define a 'danger zone' near the saturation threshold to cross-fade
+    # between exposures and avoid harsh clipping artifacts.
     edge_softness = 0.05
-    lower_bound = saturation_threshold - edge_softness  # e.g., 0.90
+    lower_bound = saturation_threshold - edge_softness
 
     # 4. Boundary-safe intersection
-    # We must ensure that [r + row_offset] and [c + col_offset] stay within
-    # the target_image bounds. We add a 1-pixel margin for the bilinear interpolation.
+    # We calculate the safe overlap between the shifted tile and the image bounds,
+    # leaving a 1-pixel margin for the bilinear interpolation kernel.
     r_start = int(max(row_start, np.ceil(-row_offset), 0))
     r_end = int(min(row_start + tile_size, np.floor(height - row_offset - 1), height))
 
@@ -850,27 +847,28 @@ def merge_tile(
     # 5. Accumulation Loop
     for r in range(r_start, r_end):
         for c in range(c_start, c_end):
-            # Subpixel sampling from the target image
+            # Sample from the target image using Bayer-safe bilinear interpolation
             raw_val = sample_raw_bilinear(target_image, r, c, row_offset, col_offset)
-            # Check for saturation of the non-scaled pixel: if clipped, it carries no useful detail
-            # A value from reference image should be added anyway
+
+            # Skip clipped pixels in target frames to avoid baking in 'dead' highlights.
+            # A value from reference image should be added regardless.
             if not is_reference and raw_val > saturation_threshold:
                 continue
-            # If the pixel is in the 'danger zone' [0.90, 0.95], we linearly reduce
-            # the long exposure's weight. This forces the accumulator to cross-fade
-            # to the short-exposure frames, preventing jagged clipping edges.
+
+            # Linear fade-out near saturation (Soft-thresholding)
             if not is_reference and raw_val > lower_bound:
                 fade = (saturation_threshold - raw_val) / edge_softness
             else:
                 fade = 1.0
-            # Reference always has weight 1.0; others are scaled by SNR and the Fade ramp.
+
+            # Reference frame is always trusted; others are scaled by SNR and Fade
             current_snr_w = 1.0 if is_reference else (snr_weight * fade)
 
             # Spatial blending
             # Combines robustness (motion), SNR (quality), and the Hann window (seams).
             combined_weight = robustness_weight * current_snr_w * blending_window[r - row_start, c - col_start]
 
-            # Linearize and Accumulate
+            # Multiply raw_val by exposure_scaler to match the reference frame's brightness.
             merged_accumulator[r, c] += (raw_val * exposure_scaler) * combined_weight
             weights_accumulator[r, c] += combined_weight
 
@@ -937,7 +935,7 @@ def merge_images(
     merged_accumulator = np.zeros((image_height, image_width), dtype=np.float32)
     weights_accumulator = np.zeros((image_height, image_width), dtype=np.float32)
 
-    # 2. Generate reference grayscale proxy for alignment
+    # 2. Generate the reference luma proxy (for alignment)
     reference_luma_proxy = get_luma_proxy(reference_image, reference_metadata)
     proxy_height, proxy_width = reference_luma_proxy.shape
     if image_height // proxy_height != image_width // proxy_width:
@@ -949,15 +947,16 @@ def merge_images(
         logger.warning("Luma proxy is scaled by an odd number: merging can cause catastrophic color artifacts.")
 
     # 3. Parameters for block matching
+    # 50% tile overlap (stride = size // 2) for smooth blending
     tile_stride = tile_size // 2
     proxy_tile_size = tile_size // size_scaler
     proxy_stride = tile_stride // size_scaler
     proxy_max_search_radius = max_search_radius // size_scaler
 
     # 4. Noise Estimation & Adaptive K Calculation
-    noise_scales, noise_offsets = get_noise_params_2x2(burst_images, metadata)
+    noise_scales, noise_offsets = get_noise_profile(reference_image, reference_metadata)
 
-    # Calculates k using a logarithmic ISO scale. Doubling ISO (1 stop) increases k linearly.
+    # Adaptive Robustness (k): Increase k at higher ISOs to allow more temporal averaging (denoising) when the signal is weak.
     current_iso = metadata[0].get("ISO")
     if not current_iso:
         raise RuntimeError("ISO is not provided in the metadata.")
@@ -974,6 +973,7 @@ def merge_images(
     proxy_cols = list(range(0, proxy_width - proxy_tile_size, proxy_stride))
     proxy_cols.append(proxy_width - proxy_tile_size)  # Edge coverage
 
+    # Pre-build the reference pyramid
     reference_pyramids = [reference_luma_proxy]  # Level 0
     for _ in range(2):  # Level 1 and 2
         reference_pyramids.append(downsample_luma_proxy(reference_pyramids[-1]))
@@ -981,19 +981,21 @@ def merge_images(
     # Note: we need to loop through the reference image using the same tiling logic as the target images.
     #       This ensures the spatial weights (the "window sum") are perfectly uniform across the frame.
     for img_idx in trange(len(burst_images), desc="Align&Merge (Images)", ascii=True):
-        if img_idx != sharpest_image_idx:
-            target_pyramids = [
-                get_luma_proxy(burst_images[img_idx], metadata[img_idx]) * exposure_scalers[img_idx]
-            ]  # Level 0
+        is_reference = img_idx == sharpest_image_idx
+
+        if not is_reference:
+            # Build target pyramid (with brightness normalization)
+            target_luma = get_luma_proxy(burst_images[img_idx], metadata[img_idx])
+            target_pyramids = [target_luma * exposure_scalers[img_idx]]  # Level 0
             for _ in range(2):  # Level 1 and 2
                 target_pyramids.append(downsample_luma_proxy(target_pyramids[-1]))
 
         for proxy_row in proxy_rows:
             for proxy_col in proxy_cols:
-                if img_idx == sharpest_image_idx:
+                if is_reference:
                     row_offset, col_offset, score = 0, 0, 0
                 else:
-                    row_offset, col_offset, score = find_best_offset_pyramids(
+                    row_offset, col_offset, score = find_best_offset(
                         reference_pyramids=reference_pyramids,
                         target_pyramids=target_pyramids,
                         row_start=proxy_row,
@@ -1018,7 +1020,7 @@ def merge_images(
                     blending_window=hann_window,
                     k=k_adaptive,
                     exposure_scaler=exposure_scalers[img_idx],
-                    is_reference=(img_idx == sharpest_image_idx),
+                    is_reference=is_reference,
                 )
 
     # 6. Final normalization (weighted average across overlapping tiles)
