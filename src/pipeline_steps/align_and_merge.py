@@ -314,31 +314,7 @@ def estimate_noise_profile(image: np.ndarray, patch_size: int = 8) -> tuple[np.n
     return scales_grid, offsets_grid
 
 
-def get_hann_window_2d(tile_size: int) -> np.ndarray:
-    """
-    Generates a 2D Hann (raised cosine) window for seamless tile blending.
-
-    The window tapers to zero at the edges, ensuring that when tiles with 50% overlap are summed,
-    the spatial weights add up to a constant 1.0.
-    The 0.5 pixel offset aligns the cosine curve to pixel centers.
-
-    Args:
-        tile_size: The width and height of the square tile in pixels.
-
-    Returns:
-        A 2D array of shape (tile_size, tile_size) containing the
-        normalized blending weights.
-
-    """
-
-    pos = np.arange(tile_size, dtype=np.float32)
-    # The (pos + 0.5) ensures the window is centered on pixels
-    w_1d = 0.5 * (1 - np.cos(2 * np.pi * (pos + 0.5) / tile_size))
-    # Create 2D map via outer product
-    return np.outer(w_1d, w_1d).astype(np.float32)
-
-
-# ---------------------------------------- Utility functions -----------------------------------------
+# ---------------------------------------- Aligning functions ----------------------------------------
 
 
 @njit(fastmath=True)
@@ -464,9 +440,6 @@ def _compute_tile_sad(
     return (sad * inv_sigma) / non_clipped_count
 
 
-# ---------------------------------------- Aligning functions ----------------------------------------
-
-
 @njit(fastmath=True)
 def find_best_integer_offset(
     reference_proxy: np.ndarray,
@@ -515,15 +488,15 @@ def find_best_integer_offset(
 
 
 @njit(fastmath=True)
-def find_best_offset_final(
+def find_best_offset_float(
     reference_proxy: np.ndarray,
     target_proxy: np.ndarray,
     row_start: int,
     col_start: int,
     tile_size: int,
-    hint_dy: int,
-    hint_dx: int,
-    search_radius: int,
+    best_dy_int: int,
+    best_dx_int: int,
+    min_sad: float,
     inv_sigma: float,
 ) -> tuple[float, float, float]:
     """
@@ -538,9 +511,6 @@ def find_best_offset_final(
         row_start: Top row index of the tile in Level 0 pixels.
         col_start: Left column index of the tile in Level 0 pixels.
         tile_size: Size of the tile in pixels.
-        hint_dy: Initial row offset guess (from level 1).
-        hint_dx: Initial column offset guess (from level 1).
-        search_radius: Local search area (typically 1).
         inv_sigma: Noise-normalization factor.
 
     Returns:
@@ -548,20 +518,7 @@ def find_best_offset_final(
 
     """
 
-    # --- 1. Local Integer Refinement ---
-    best_dy_int, best_dx_int, min_sad = find_best_integer_offset(
-        reference_proxy=reference_proxy,
-        target_proxy=target_proxy,
-        row_start=row_start,
-        col_start=col_start,
-        tile_size=tile_size,
-        hint_dy=hint_dy,
-        hint_dx=hint_dx,
-        search_radius=search_radius,
-        inv_sigma=inv_sigma,
-    )
-
-    # --- 2. Sub-pixel Refinement within 3x3 neighborhood ---
+    # --- 1. Sub-pixel Refinement within 3x3 neighborhood ---
     # Centered on the best integer offset to calculate the surface curvature
     neighborhood = np.zeros((3, 3), dtype=np.float32)
     neighborhood[1, 1] = min_sad
@@ -575,7 +532,7 @@ def find_best_offset_final(
         # Use -1 as a sentinel for tiles that fall off the image sensor boundary
         neighborhood[offset_row + 1, offset_col + 1] = -1 if (sad is None) else sad
 
-    # --- 3. Boundary Fallback ---
+    # --- 2. Boundary Fallback ---
     # If a neighbor is off-screen, mirror the SAD value from the opposite side
     # to allow the parabola to still be calculated.
     for i, j in cross_offsets:
@@ -585,7 +542,7 @@ def find_best_offset_final(
             opp_val = neighborhood[1 - i, 1 - j]
             neighborhood[row_idx, col_idx] = max(opp_val, min_sad)
 
-    # --- 4. Sub-pixel Parabola Fitting ---
+    # --- 3. Sub-pixel Parabola Fitting ---
     # find_subpixel_shift fits a 1D parabola to rows and columns independently
     sub_dy, sub_dx = find_subpixel_shift(neighborhood)
 
@@ -655,50 +612,69 @@ def find_best_offset_pyramids(
     sigma_sq = max(1e-9, var_ref + var_tgt) * proxy_variance_scale
     inv_sigma = 1.0 / (np.sqrt(sigma_sq) + 1e-8)
 
-    # --- 2. Coarsest Level (Level 2: 1/4 of Proxy) ---
-    # Search radius is scaled down. A 1px shift here = 4px at Level 0.
-    best_dy, best_dx, _ = find_best_integer_offset(
-        reference_proxy=reference_pyramids[2],
-        target_proxy=target_pyramids[2],
-        row_start=row_start // 4,
-        col_start=col_start // 4,
-        tile_size=tile_size,
-        hint_dy=0,
-        hint_dx=0,
-        search_radius=search_radius // 4,
-        inv_sigma=inv_sigma,
-    )
+    # # --- 2. Coarsest Level (Level 2: 1/4 of Proxy) ---
+    # # Search radius is scaled down. A 1px shift here = 4px at Level 0.
+    #
+    # # --- 3. Middle Level (Level 1: 1/2 of Proxy) ---
+    # # Multiply coarsest shift by 2 to align with Level 1 scale.
+    #
+    # # --- 4. Level 0 (Highest Res Proxy) ---
+    best_dy_int = best_dx_int = 0
+    proxy_scaler = 4
+    for idx in range(len(reference_pyramids)):
+        best_dy_int, best_dx_int, min_sad = find_best_integer_offset(
+            reference_proxy=reference_pyramids[-1 - idx],
+            target_proxy=target_pyramids[-1 - idx],
+            row_start=row_start // proxy_scaler,
+            col_start=col_start // proxy_scaler,
+            tile_size=tile_size,
+            hint_dy=best_dy_int * 2,
+            hint_dx=best_dx_int * 2,
+            search_radius=search_radius // 4 if idx == 0 else 1,
+            inv_sigma=inv_sigma,
+        )
+        proxy_scaler //= 2
 
-    # --- 3. Middle Level (Level 1: 1/2 of Proxy) ---
-    # Multiply coarsest shift by 2 to align with Level 1 scale.
-    best_dy, best_dx, _ = find_best_integer_offset(
-        reference_proxy=reference_pyramids[1],
-        target_proxy=target_pyramids[1],
-        row_start=row_start // 2,
-        col_start=col_start // 2,
-        tile_size=tile_size,
-        hint_dy=best_dy * 2,
-        hint_dx=best_dx * 2,
-        search_radius=1,
-        inv_sigma=inv_sigma,
-    )
-
-    # --- 4. Level 0 (Highest Res Proxy) ---
+    # --- 5. Level 0 (Highest Res Proxy) ---
     # Final refinement with sub-pixel interpolation.
-    return find_best_offset_final(
+    return find_best_offset_float(
         reference_proxy=reference_pyramids[0],
         target_proxy=target_pyramids[0],
         row_start=row_start,
         col_start=col_start,
         tile_size=tile_size,
-        hint_dy=best_dy * 2,
-        hint_dx=best_dx * 2,
-        search_radius=1,
+        best_dy_int=best_dy_int,
+        best_dx_int=best_dx_int,
+        min_sad=min_sad,
         inv_sigma=inv_sigma,
     )
 
 
 # ----------------------------------------- Merging functions -----------------------------------------
+
+
+def get_hann_window_2d(tile_size: int) -> np.ndarray:
+    """
+    Generates a 2D Hann (raised cosine) window for seamless tile blending.
+
+    The window tapers to zero at the edges, ensuring that when tiles with 50% overlap are summed,
+    the spatial weights add up to a constant 1.0.
+    The 0.5 pixel offset aligns the cosine curve to pixel centers.
+
+    Args:
+        tile_size: The width and height of the square tile in pixels.
+
+    Returns:
+        A 2D array of shape (tile_size, tile_size) containing the
+        normalized blending weights.
+
+    """
+
+    pos = np.arange(tile_size, dtype=np.float32)
+    # The (pos + 0.5) ensures the window is centered on pixels
+    w_1d = 0.5 * (1 - np.cos(2 * np.pi * (pos + 0.5) / tile_size))
+    # Create 2D map via outer product
+    return np.outer(w_1d, w_1d).astype(np.float32)
 
 
 @njit(fastmath=True)
