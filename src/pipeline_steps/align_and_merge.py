@@ -2,7 +2,7 @@ from typing import Any
 
 import numpy as np
 from loguru import logger
-from numba import njit
+from numba import njit, prange
 from scipy import stats
 from scipy.ndimage import convolve, gaussian_filter
 from tqdm import trange
@@ -891,6 +891,83 @@ def merge_tile(
             weights_accumulator[r, c] += combined_weight
 
 
+@njit(parallel=True, fastmath=True)
+def _parallel_tile_processor(
+    # --- INPUT DATA (The Pyramids) ---
+    reference_proxy_level_0: np.ndarray,
+    reference_proxy_level_1: np.ndarray,
+    reference_proxy_level_2: np.ndarray,
+    target_proxy_level_0: np.ndarray,
+    target_proxy_level_1: np.ndarray,
+    target_proxy_level_2: np.ndarray,
+    # --- SPATIAL / TILE LOGIC ---
+    proxy_rows: np.ndarray,
+    proxy_cols: np.ndarray,
+    proxy_tile_size: int,
+    proxy_max_search_radius: int,
+    size_scaler: float,
+    hann_window: np.ndarray,
+    # --- PHYSICAL / NOISE PARAMETERS ---
+    noise_scales: np.ndarray,
+    noise_offsets: np.ndarray,
+    exposure_scaler: np.ndarray,
+    k_adaptive: float,
+    # --- EXECUTION STATE ---
+    target_image: np.ndarray,
+    merged_accumulator: np.ndarray,
+    weights_accumulator: np.ndarray,
+    is_reference: bool,
+):
+    """
+    Coordinates the multi-threaded alignment and merging of image tiles.
+
+    This function parallelizes the processing of image patches by iterating through the luma proxy
+    coordinates, computing sub-pixel offsets for each tile via a hierarchical search, and
+    accumulating the warped results into the final high-resolution buffers using a weighted
+    robustness and SNR-aware model.
+    """
+
+    for idx in prange(len(proxy_rows)):  # ty:ignore[not-iterable]
+        proxy_row = proxy_rows[idx]
+        for proxy_col in proxy_cols:
+            if is_reference:
+                # Images aligned to the reference; to itself it is a perfect match
+                row_offset, col_offset, score = 0, 0, 0
+            else:
+                row_offset, col_offset, score = find_best_offset(
+                    reference_proxy_level_0=reference_proxy_level_0,
+                    reference_proxy_level_1=reference_proxy_level_1,
+                    reference_proxy_level_2=reference_proxy_level_2,
+                    target_proxy_level_0=target_proxy_level_0,
+                    target_proxy_level_1=target_proxy_level_1,
+                    target_proxy_level_2=target_proxy_level_2,
+                    row_start=proxy_row,
+                    col_start=proxy_col,
+                    tile_size=proxy_tile_size,
+                    search_radius=proxy_max_search_radius,
+                    noise_scales=noise_scales,
+                    noise_offsets=noise_offsets,
+                    exposure_scaler=exposure_scaler,
+                )
+
+            # Merging is done on full-res image, thus size_scaler is used
+            merge_tile(
+                merged_accumulator=merged_accumulator,
+                weights_accumulator=weights_accumulator,
+                target_image=target_image,
+                row_start=proxy_row * size_scaler,
+                col_start=proxy_col * size_scaler,
+                row_offset=row_offset * size_scaler,
+                col_offset=col_offset * size_scaler,
+                sad_score=score,
+                tile_size=proxy_tile_size * size_scaler,
+                blending_window=hann_window,
+                exposure_scaler=exposure_scaler,
+                k=k_adaptive,
+                is_reference=is_reference,
+            )
+
+
 @register_step(ISPStep.ALIGN_AND_MERGE)
 def merge_images(
     burst_images: list[np.ndarray],
@@ -1001,48 +1078,44 @@ def merge_images(
     for img_idx in trange(len(burst_images), desc="Align&Merge (Images)", ascii=True):
         is_reference = img_idx == sharpest_image_idx
 
-        if not is_reference:
+        if is_reference:
+            # Ensure target_pyramid always has arrays, even if they are just 1x1 zeros
+            # This keeps the Numba type signature stable
+            target_proxy_level_0 = np.zeros((1, 1), dtype=np.float32)
+            target_proxy_level_1 = np.zeros((1, 1), dtype=np.float32)
+            target_proxy_level_2 = np.zeros((1, 1), dtype=np.float32)
+        else:
             # Build target pyramid (with brightness normalization)
             target_proxy_level_0 = get_luma_proxy(burst_images[img_idx], metadata[img_idx]) * exposure_scalers[img_idx]
             target_proxy_level_1 = downsample_luma_proxy(target_proxy_level_0)
             target_proxy_level_2 = downsample_luma_proxy(target_proxy_level_1)
 
-        for proxy_row in proxy_rows:
-            for proxy_col in proxy_cols:
-                if is_reference:
-                    row_offset, col_offset, score = 0, 0, 0
-                else:
-                    row_offset, col_offset, score = find_best_offset(
-                        reference_proxy_level_0=reference_proxy_level_0,
-                        reference_proxy_level_1=reference_proxy_level_1,
-                        reference_proxy_level_2=reference_proxy_level_2,
-                        target_proxy_level_0=target_proxy_level_0,
-                        target_proxy_level_1=target_proxy_level_1,
-                        target_proxy_level_2=target_proxy_level_2,
-                        row_start=proxy_row,
-                        col_start=proxy_col,
-                        tile_size=proxy_tile_size,
-                        search_radius=proxy_max_search_radius,
-                        noise_scales=noise_scales,
-                        noise_offsets=noise_offsets,
-                        exposure_scaler=exposure_scalers[img_idx],
-                    )
-                # Merging is done on full-res image, thus size_scaler is used
-                merge_tile(
-                    merged_accumulator=merged_accumulator,
-                    weights_accumulator=weights_accumulator,
-                    target_image=burst_images[img_idx],
-                    row_offset=row_offset * size_scaler,
-                    col_offset=col_offset * size_scaler,
-                    sad_score=score,
-                    row_start=proxy_row * size_scaler,
-                    col_start=proxy_col * size_scaler,
-                    tile_size=tile_size,
-                    blending_window=hann_window,
-                    k=k_adaptive,
-                    exposure_scaler=exposure_scalers[img_idx],
-                    is_reference=is_reference,
-                )
+        _parallel_tile_processor(
+            # --- INPUT DATA (The Pyramids) ---
+            reference_proxy_level_0=reference_proxy_level_0,
+            reference_proxy_level_1=reference_proxy_level_1,
+            reference_proxy_level_2=reference_proxy_level_2,
+            target_proxy_level_0=target_proxy_level_0,
+            target_proxy_level_1=target_proxy_level_1,
+            target_proxy_level_2=target_proxy_level_2,
+            # --- SPATIAL / TILE LOGIC ---
+            proxy_rows=np.asarray(proxy_rows),
+            proxy_cols=np.asarray(proxy_cols),
+            proxy_tile_size=proxy_tile_size,
+            proxy_max_search_radius=proxy_max_search_radius,
+            size_scaler=size_scaler,
+            hann_window=hann_window,
+            # --- PHYSICAL / NOISE PARAMETERS ---
+            noise_scales=noise_scales,
+            noise_offsets=noise_offsets,
+            exposure_scaler=exposure_scalers[img_idx],
+            k_adaptive=k_adaptive,
+            # --- EXECUTION STATE ---
+            target_image=burst_images[img_idx],
+            merged_accumulator=merged_accumulator,
+            weights_accumulator=weights_accumulator,
+            is_reference=is_reference,
+        )
 
     # 6. Final normalization (weighted average across overlapping tiles)
     mask = weights_accumulator > 0
