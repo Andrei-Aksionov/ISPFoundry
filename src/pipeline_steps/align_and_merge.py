@@ -2,7 +2,7 @@ from typing import Any
 
 import numpy as np
 from loguru import logger
-from numba import njit
+from numba import njit, prange
 from scipy import stats
 from scipy.ndimage import convolve, gaussian_filter
 from tqdm import trange
@@ -402,25 +402,20 @@ def compute_tile_sad(
     if r_start >= r_end or c_start >= c_end:
         return None
 
-    # Slicing: The target slice must be offset by `dy` and `dx` because it is the 'shifted' version of the reference
-    ref_view = reference_proxy[r_start:r_end, c_start:c_end]
-    tgt_view = target_proxy[r_start + row_offset : r_end + row_offset, c_start + col_offset : c_end + col_offset]
-
     # Width Numba per-pixel calculation is faster
     # np.sum(np.abs(...)) leads to temporary array allocations
     sad = 0.0
     non_clipped_count = 0
-    rows, cols = ref_view.shape
-    for r in range(rows):
-        for c in range(cols):
-            ref_val, tgt_val = ref_view[r, c], tgt_view[r, c]
+    for r in range(r_start, r_end):
+        for c in range(c_start, c_end):
+            ref_val, tgt_val = reference_proxy[r, c], target_proxy[r + row_offset, c + col_offset]
             # Only count pixels that are valid (not clipped) in both frames
             if ref_val < saturation_threshold and tgt_val < saturation_threshold:
                 sad += abs(ref_val - tgt_val)
                 non_clipped_count += 1
 
     # If 75%+ of a tile is pure white (clipped), there isn't enough texture left to determine an offset.
-    if non_clipped_count < (rows * cols) // 4:
+    if non_clipped_count < ((r_end - r_start) * (c_end - c_start)) // 4:
         return None
 
     # Normalization: If tiles are partially off-image, a smaller area will naturally have a lower SAD.
@@ -551,8 +546,12 @@ def find_best_float_offset(
 
 @njit(fastmath=True)
 def find_best_offset(
-    reference_pyramids: list[np.ndarray],
-    target_pyramids: list[np.ndarray],
+    reference_proxy_level_0: np.ndarray,
+    reference_proxy_level_1: np.ndarray,
+    reference_proxy_level_2: np.ndarray,
+    target_proxy_level_0: np.ndarray,
+    target_proxy_level_1: np.ndarray,
+    target_proxy_level_2: np.ndarray,
     row_start: int,
     col_start: int,
     tile_size: int,
@@ -574,8 +573,12 @@ def find_best_offset(
     alignment remains robust in dark, noisy regions without over-fitting to sensor grain.
 
     Args:
-        reference_pyramids: List of proxies from highest to lowest resolution.
-        target_pyramids: List of target proxies from highest to lowest resolution.
+        reference_proxy_level_0: Luma proxy of the reference image at the highest resolution.
+        reference_proxy_level_1: Luma proxy of the reference image at the mid resolution.
+        reference_proxy_level_2: Luma proxy of the reference image at the lowest resolution.
+        target_proxy_level_0: Luma proxy of the target image at the highest resolution.
+        target_proxy_level_1: Luma proxy of the target image at the mid resolution.
+        target_proxy_level_2: Luma proxy of the target image at the lowest resolution.
         row_start: Top row index of the tile at Level 0 (highest resolution).
         col_start: Left column index of the tile at Level 0(highest resolution).
         tile_size: Pixel size of tiles (constant across levels).
@@ -591,7 +594,7 @@ def find_best_offset(
 
     # --- 1. Noise Floor Estimation ---
     # Estimate the noise floor once at the highest resolution to guide the whole hierarchical search.
-    ref_tile = reference_pyramids[0][row_start : row_start + tile_size, col_start : col_start + tile_size]
+    ref_tile = reference_proxy_level_0[row_start : row_start + tile_size, col_start : col_start + tile_size]
     tile_mean = np.mean(ref_tile)
 
     avg_scale = np.mean(noise_scales)
@@ -614,36 +617,51 @@ def find_best_offset(
 
     # --- 2. Hierarchical Integer Search ---
     # Level 2 (1/4 of Proxy) --> Level 1 (1/2 of Proxy) --> Level 0 (Proxy)
-    best_dy_int = best_dx_int = 0
-    num_levels = len(reference_pyramids)
-    proxy_scaler = 2 ** (num_levels - 1)
-    for idx in range(len(reference_pyramids)):
-        # We iterate from the coarsest level (last in list) to the finest (first in list)
-        level_ref = reference_pyramids[num_levels - 1 - idx]
-        level_tgt = target_pyramids[num_levels - 1 - idx]
 
-        # Wide search at the coarsest level, narrow refinement thereafter
-        level_search_radius = search_radius // proxy_scaler if idx == 0 else 1
+    # Coarsest Level (L2) - Full search
+    best_dy_int, best_dx_int, _ = find_best_integer_offset(
+        reference_proxy=reference_proxy_level_2,
+        target_proxy=target_proxy_level_2,
+        row_start=row_start // 4,
+        col_start=col_start // 4,
+        tile_size=tile_size,
+        hint_dy=0,
+        hint_dx=0,
+        search_radius=search_radius // 4,
+        inv_sigma=inv_sigma,
+    )
 
-        best_dy_int, best_dx_int, min_sad = find_best_integer_offset(
-            reference_proxy=level_ref,
-            target_proxy=level_tgt,
-            row_start=row_start // proxy_scaler,
-            col_start=col_start // proxy_scaler,
-            tile_size=tile_size,
-            hint_dy=best_dy_int * 2,  # Scale previous level's shift up to current scale
-            hint_dx=best_dx_int * 2,
-            search_radius=level_search_radius,
-            inv_sigma=inv_sigma,
-        )
-        # Prepare scaler for the next (finer) level
-        proxy_scaler //= 2
+    # Mid Level (L1) - Refine hint
+    best_dy_int, best_dx_int, _ = find_best_integer_offset(
+        reference_proxy=reference_proxy_level_1,
+        target_proxy=target_proxy_level_1,
+        row_start=row_start // 2,
+        col_start=col_start // 2,
+        tile_size=tile_size,
+        hint_dy=best_dy_int * 2,  # Scale previous level's shift up to current scale
+        hint_dx=best_dx_int * 2,
+        search_radius=1,
+        inv_sigma=inv_sigma,
+    )
+
+    # Fine Level (L0) - Final refine
+    best_dy_int, best_dx_int, min_sad = find_best_integer_offset(
+        reference_proxy=reference_proxy_level_0,
+        target_proxy=target_proxy_level_0,
+        row_start=row_start,
+        col_start=col_start,
+        tile_size=tile_size,
+        hint_dy=best_dy_int * 2,
+        hint_dx=best_dx_int * 2,
+        search_radius=1,
+        inv_sigma=inv_sigma,
+    )
 
     # --- 3. Final Sub-pixel Refinement ---
     # After finding the best integer match at the highest resolution (Level 0) find the sub-pixel peak.
     return find_best_float_offset(
-        reference_proxy=reference_pyramids[0],
-        target_proxy=target_pyramids[0],
+        reference_proxy=reference_proxy_level_0,
+        target_proxy=target_proxy_level_0,
         row_start=row_start,
         col_start=col_start,
         tile_size=tile_size,
@@ -873,6 +891,83 @@ def merge_tile(
             weights_accumulator[r, c] += combined_weight
 
 
+@njit(parallel=True, fastmath=True)
+def _parallel_tile_processor(
+    # --- INPUT DATA (The Pyramids) ---
+    reference_proxy_level_0: np.ndarray,
+    reference_proxy_level_1: np.ndarray,
+    reference_proxy_level_2: np.ndarray,
+    target_proxy_level_0: np.ndarray,
+    target_proxy_level_1: np.ndarray,
+    target_proxy_level_2: np.ndarray,
+    # --- SPATIAL / TILE LOGIC ---
+    proxy_rows: np.ndarray,
+    proxy_cols: np.ndarray,
+    proxy_tile_size: int,
+    proxy_max_search_radius: int,
+    size_scaler: float,
+    hann_window: np.ndarray,
+    # --- PHYSICAL / NOISE PARAMETERS ---
+    noise_scales: np.ndarray,
+    noise_offsets: np.ndarray,
+    exposure_scaler: np.ndarray,
+    k_adaptive: float,
+    # --- EXECUTION STATE ---
+    target_image: np.ndarray,
+    merged_accumulator: np.ndarray,
+    weights_accumulator: np.ndarray,
+    is_reference: bool,
+):
+    """
+    Coordinates the multi-threaded alignment and merging of image tiles.
+
+    This function parallelizes the processing of image patches by iterating through the luma proxy
+    coordinates, computing sub-pixel offsets for each tile via a hierarchical search, and
+    accumulating the warped results into the final high-resolution buffers using a weighted
+    robustness and SNR-aware model.
+    """
+
+    for idx in prange(len(proxy_rows)):  # ty:ignore[not-iterable]
+        proxy_row = proxy_rows[idx]
+        for proxy_col in proxy_cols:
+            if is_reference:
+                # Images aligned to the reference; to itself it is a perfect match
+                row_offset, col_offset, score = 0, 0, 0
+            else:
+                row_offset, col_offset, score = find_best_offset(
+                    reference_proxy_level_0=reference_proxy_level_0,
+                    reference_proxy_level_1=reference_proxy_level_1,
+                    reference_proxy_level_2=reference_proxy_level_2,
+                    target_proxy_level_0=target_proxy_level_0,
+                    target_proxy_level_1=target_proxy_level_1,
+                    target_proxy_level_2=target_proxy_level_2,
+                    row_start=proxy_row,
+                    col_start=proxy_col,
+                    tile_size=proxy_tile_size,
+                    search_radius=proxy_max_search_radius,
+                    noise_scales=noise_scales,
+                    noise_offsets=noise_offsets,
+                    exposure_scaler=exposure_scaler,
+                )
+
+            # Merging is done on full-res image, thus size_scaler is used
+            merge_tile(
+                merged_accumulator=merged_accumulator,
+                weights_accumulator=weights_accumulator,
+                target_image=target_image,
+                row_start=proxy_row * size_scaler,
+                col_start=proxy_col * size_scaler,
+                row_offset=row_offset * size_scaler,
+                col_offset=col_offset * size_scaler,
+                sad_score=score,
+                tile_size=proxy_tile_size * size_scaler,
+                blending_window=hann_window,
+                exposure_scaler=exposure_scaler,
+                k=k_adaptive,
+                is_reference=is_reference,
+            )
+
+
 @register_step(ISPStep.ALIGN_AND_MERGE)
 def merge_images(
     burst_images: list[np.ndarray],
@@ -974,54 +1069,53 @@ def merge_images(
     proxy_cols.append(proxy_width - proxy_tile_size)  # Edge coverage
 
     # Pre-build the reference pyramid
-    reference_pyramids = [reference_luma_proxy]  # Level 0
-    for _ in range(2):  # Level 1 and 2
-        reference_pyramids.append(downsample_luma_proxy(reference_pyramids[-1]))
+    reference_proxy_level_0 = reference_luma_proxy
+    reference_proxy_level_1 = downsample_luma_proxy(reference_proxy_level_0)
+    reference_proxy_level_2 = downsample_luma_proxy(reference_proxy_level_1)
 
     # Note: we need to loop through the reference image using the same tiling logic as the target images.
     #       This ensures the spatial weights (the "window sum") are perfectly uniform across the frame.
     for img_idx in trange(len(burst_images), desc="Align&Merge (Images)", ascii=True):
         is_reference = img_idx == sharpest_image_idx
 
-        if not is_reference:
+        if is_reference:
+            # Ensure target_pyramid always has arrays, even if they are just 1x1 zeros
+            # This keeps the Numba type signature stable
+            target_proxy_level_0 = np.zeros((1, 1), dtype=np.float32)
+            target_proxy_level_1 = np.zeros((1, 1), dtype=np.float32)
+            target_proxy_level_2 = np.zeros((1, 1), dtype=np.float32)
+        else:
             # Build target pyramid (with brightness normalization)
-            target_luma = get_luma_proxy(burst_images[img_idx], metadata[img_idx])
-            target_pyramids = [target_luma * exposure_scalers[img_idx]]  # Level 0
-            for _ in range(2):  # Level 1 and 2
-                target_pyramids.append(downsample_luma_proxy(target_pyramids[-1]))
+            target_proxy_level_0 = get_luma_proxy(burst_images[img_idx], metadata[img_idx]) * exposure_scalers[img_idx]
+            target_proxy_level_1 = downsample_luma_proxy(target_proxy_level_0)
+            target_proxy_level_2 = downsample_luma_proxy(target_proxy_level_1)
 
-        for proxy_row in proxy_rows:
-            for proxy_col in proxy_cols:
-                if is_reference:
-                    row_offset, col_offset, score = 0, 0, 0
-                else:
-                    row_offset, col_offset, score = find_best_offset(
-                        reference_pyramids=reference_pyramids,
-                        target_pyramids=target_pyramids,
-                        row_start=proxy_row,
-                        col_start=proxy_col,
-                        tile_size=proxy_tile_size,
-                        search_radius=proxy_max_search_radius,
-                        noise_scales=noise_scales,
-                        noise_offsets=noise_offsets,
-                        exposure_scaler=exposure_scalers[img_idx],
-                    )
-                # Merging is done on full-res image, thus size_scaler is used
-                merge_tile(
-                    merged_accumulator=merged_accumulator,
-                    weights_accumulator=weights_accumulator,
-                    target_image=burst_images[img_idx],
-                    row_offset=row_offset * size_scaler,
-                    col_offset=col_offset * size_scaler,
-                    sad_score=score,
-                    row_start=proxy_row * size_scaler,
-                    col_start=proxy_col * size_scaler,
-                    tile_size=tile_size,
-                    blending_window=hann_window,
-                    k=k_adaptive,
-                    exposure_scaler=exposure_scalers[img_idx],
-                    is_reference=is_reference,
-                )
+        _parallel_tile_processor(
+            # --- INPUT DATA (The Pyramids) ---
+            reference_proxy_level_0=reference_proxy_level_0,
+            reference_proxy_level_1=reference_proxy_level_1,
+            reference_proxy_level_2=reference_proxy_level_2,
+            target_proxy_level_0=target_proxy_level_0,
+            target_proxy_level_1=target_proxy_level_1,
+            target_proxy_level_2=target_proxy_level_2,
+            # --- SPATIAL / TILE LOGIC ---
+            proxy_rows=np.asarray(proxy_rows),
+            proxy_cols=np.asarray(proxy_cols),
+            proxy_tile_size=proxy_tile_size,
+            proxy_max_search_radius=proxy_max_search_radius,
+            size_scaler=size_scaler,
+            hann_window=hann_window,
+            # --- PHYSICAL / NOISE PARAMETERS ---
+            noise_scales=noise_scales,
+            noise_offsets=noise_offsets,
+            exposure_scaler=exposure_scalers[img_idx],
+            k_adaptive=k_adaptive,
+            # --- EXECUTION STATE ---
+            target_image=burst_images[img_idx],
+            merged_accumulator=merged_accumulator,
+            weights_accumulator=weights_accumulator,
+            is_reference=is_reference,
+        )
 
     # 6. Final normalization (weighted average across overlapping tiles)
     mask = weights_accumulator > 0
