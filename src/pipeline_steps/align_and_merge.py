@@ -402,25 +402,20 @@ def compute_tile_sad(
     if r_start >= r_end or c_start >= c_end:
         return None
 
-    # Slicing: The target slice must be offset by `dy` and `dx` because it is the 'shifted' version of the reference
-    ref_view = reference_proxy[r_start:r_end, c_start:c_end]
-    tgt_view = target_proxy[r_start + row_offset : r_end + row_offset, c_start + col_offset : c_end + col_offset]
-
     # Width Numba per-pixel calculation is faster
     # np.sum(np.abs(...)) leads to temporary array allocations
     sad = 0.0
     non_clipped_count = 0
-    rows, cols = ref_view.shape
-    for r in range(rows):
-        for c in range(cols):
-            ref_val, tgt_val = ref_view[r, c], tgt_view[r, c]
+    for r in range(r_start, r_end):
+        for c in range(c_start, c_end):
+            ref_val, tgt_val = reference_proxy[r, c], target_proxy[r + row_offset, c + col_offset]
             # Only count pixels that are valid (not clipped) in both frames
             if ref_val < saturation_threshold and tgt_val < saturation_threshold:
                 sad += abs(ref_val - tgt_val)
                 non_clipped_count += 1
 
     # If 75%+ of a tile is pure white (clipped), there isn't enough texture left to determine an offset.
-    if non_clipped_count < (rows * cols) // 4:
+    if non_clipped_count < ((r_end - r_start) * (c_end - c_start)) // 4:
         return None
 
     # Normalization: If tiles are partially off-image, a smaller area will naturally have a lower SAD.
