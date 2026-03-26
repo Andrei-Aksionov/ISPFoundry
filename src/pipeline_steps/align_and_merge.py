@@ -546,8 +546,12 @@ def find_best_float_offset(
 
 @njit(fastmath=True)
 def find_best_offset(
-    reference_pyramids: list[np.ndarray],
-    target_pyramids: list[np.ndarray],
+    reference_proxy_level_0: np.ndarray,
+    reference_proxy_level_1: np.ndarray,
+    reference_proxy_level_2: np.ndarray,
+    target_proxy_level_0: np.ndarray,
+    target_proxy_level_1: np.ndarray,
+    target_proxy_level_2: np.ndarray,
     row_start: int,
     col_start: int,
     tile_size: int,
@@ -569,8 +573,12 @@ def find_best_offset(
     alignment remains robust in dark, noisy regions without over-fitting to sensor grain.
 
     Args:
-        reference_pyramids: List of proxies from highest to lowest resolution.
-        target_pyramids: List of target proxies from highest to lowest resolution.
+        reference_proxy_level_0: Luma proxy of the reference image at the highest resolution.
+        reference_proxy_level_1: Luma proxy of the reference image at the mid resolution.
+        reference_proxy_level_2: Luma proxy of the reference image at the lowest resolution.
+        target_proxy_level_0: Luma proxy of the target image at the highest resolution.
+        target_proxy_level_1: Luma proxy of the target image at the mid resolution.
+        target_proxy_level_2: Luma proxy of the target image at the lowest resolution.
         row_start: Top row index of the tile at Level 0 (highest resolution).
         col_start: Left column index of the tile at Level 0(highest resolution).
         tile_size: Pixel size of tiles (constant across levels).
@@ -586,7 +594,7 @@ def find_best_offset(
 
     # --- 1. Noise Floor Estimation ---
     # Estimate the noise floor once at the highest resolution to guide the whole hierarchical search.
-    ref_tile = reference_pyramids[0][row_start : row_start + tile_size, col_start : col_start + tile_size]
+    ref_tile = reference_proxy_level_0[row_start : row_start + tile_size, col_start : col_start + tile_size]
     tile_mean = np.mean(ref_tile)
 
     avg_scale = np.mean(noise_scales)
@@ -609,36 +617,51 @@ def find_best_offset(
 
     # --- 2. Hierarchical Integer Search ---
     # Level 2 (1/4 of Proxy) --> Level 1 (1/2 of Proxy) --> Level 0 (Proxy)
-    best_dy_int = best_dx_int = 0
-    num_levels = len(reference_pyramids)
-    proxy_scaler = 2 ** (num_levels - 1)
-    for idx in range(len(reference_pyramids)):
-        # We iterate from the coarsest level (last in list) to the finest (first in list)
-        level_ref = reference_pyramids[num_levels - 1 - idx]
-        level_tgt = target_pyramids[num_levels - 1 - idx]
 
-        # Wide search at the coarsest level, narrow refinement thereafter
-        level_search_radius = search_radius // proxy_scaler if idx == 0 else 1
+    # Coarsest Level (L2) - Full search
+    best_dy_int, best_dx_int, _ = find_best_integer_offset(
+        reference_proxy=reference_proxy_level_2,
+        target_proxy=target_proxy_level_2,
+        row_start=row_start // 4,
+        col_start=col_start // 4,
+        tile_size=tile_size,
+        hint_dy=0,
+        hint_dx=0,
+        search_radius=search_radius // 4,
+        inv_sigma=inv_sigma,
+    )
 
-        best_dy_int, best_dx_int, min_sad = find_best_integer_offset(
-            reference_proxy=level_ref,
-            target_proxy=level_tgt,
-            row_start=row_start // proxy_scaler,
-            col_start=col_start // proxy_scaler,
-            tile_size=tile_size,
-            hint_dy=best_dy_int * 2,  # Scale previous level's shift up to current scale
-            hint_dx=best_dx_int * 2,
-            search_radius=level_search_radius,
-            inv_sigma=inv_sigma,
-        )
-        # Prepare scaler for the next (finer) level
-        proxy_scaler //= 2
+    # Mid Level (L1) - Refine hint
+    best_dy_int, best_dx_int, _ = find_best_integer_offset(
+        reference_proxy=reference_proxy_level_1,
+        target_proxy=target_proxy_level_1,
+        row_start=row_start // 2,
+        col_start=col_start // 2,
+        tile_size=tile_size,
+        hint_dy=best_dy_int * 2,  # Scale previous level's shift up to current scale
+        hint_dx=best_dx_int * 2,
+        search_radius=1,
+        inv_sigma=inv_sigma,
+    )
+
+    # Fine Level (L0) - Final refine
+    best_dy_int, best_dx_int, min_sad = find_best_integer_offset(
+        reference_proxy=reference_proxy_level_0,
+        target_proxy=target_proxy_level_0,
+        row_start=row_start,
+        col_start=col_start,
+        tile_size=tile_size,
+        hint_dy=best_dy_int * 2,
+        hint_dx=best_dx_int * 2,
+        search_radius=1,
+        inv_sigma=inv_sigma,
+    )
 
     # --- 3. Final Sub-pixel Refinement ---
     # After finding the best integer match at the highest resolution (Level 0) find the sub-pixel peak.
     return find_best_float_offset(
-        reference_proxy=reference_pyramids[0],
-        target_proxy=target_pyramids[0],
+        reference_proxy=reference_proxy_level_0,
+        target_proxy=target_proxy_level_0,
         row_start=row_start,
         col_start=col_start,
         tile_size=tile_size,
@@ -969,9 +992,9 @@ def merge_images(
     proxy_cols.append(proxy_width - proxy_tile_size)  # Edge coverage
 
     # Pre-build the reference pyramid
-    reference_pyramids = [reference_luma_proxy]  # Level 0
-    for _ in range(2):  # Level 1 and 2
-        reference_pyramids.append(downsample_luma_proxy(reference_pyramids[-1]))
+    reference_proxy_level_0 = reference_luma_proxy
+    reference_proxy_level_1 = downsample_luma_proxy(reference_proxy_level_0)
+    reference_proxy_level_2 = downsample_luma_proxy(reference_proxy_level_1)
 
     # Note: we need to loop through the reference image using the same tiling logic as the target images.
     #       This ensures the spatial weights (the "window sum") are perfectly uniform across the frame.
@@ -980,10 +1003,9 @@ def merge_images(
 
         if not is_reference:
             # Build target pyramid (with brightness normalization)
-            target_luma = get_luma_proxy(burst_images[img_idx], metadata[img_idx])
-            target_pyramids = [target_luma * exposure_scalers[img_idx]]  # Level 0
-            for _ in range(2):  # Level 1 and 2
-                target_pyramids.append(downsample_luma_proxy(target_pyramids[-1]))
+            target_proxy_level_0 = get_luma_proxy(burst_images[img_idx], metadata[img_idx]) * exposure_scalers[img_idx]
+            target_proxy_level_1 = downsample_luma_proxy(target_proxy_level_0)
+            target_proxy_level_2 = downsample_luma_proxy(target_proxy_level_1)
 
         for proxy_row in proxy_rows:
             for proxy_col in proxy_cols:
@@ -991,8 +1013,12 @@ def merge_images(
                     row_offset, col_offset, score = 0, 0, 0
                 else:
                     row_offset, col_offset, score = find_best_offset(
-                        reference_pyramids=reference_pyramids,
-                        target_pyramids=target_pyramids,
+                        reference_proxy_level_0=reference_proxy_level_0,
+                        reference_proxy_level_1=reference_proxy_level_1,
+                        reference_proxy_level_2=reference_proxy_level_2,
+                        target_proxy_level_0=target_proxy_level_0,
+                        target_proxy_level_1=target_proxy_level_1,
+                        target_proxy_level_2=target_proxy_level_2,
                         row_start=proxy_row,
                         col_start=proxy_col,
                         tile_size=proxy_tile_size,
