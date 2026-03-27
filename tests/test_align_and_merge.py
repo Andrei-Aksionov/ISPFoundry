@@ -10,6 +10,7 @@ from pipeline_steps.align_and_merge import (
     estimate_noise_profile,
     find_best_float_offset,
     find_best_integer_offset,
+    find_best_offset,
     find_sharpest_image_idx,
     find_subpixel_shift,
     get_exposure_scalers,
@@ -880,6 +881,105 @@ class TestFindBestFloatOffset:
         assert isinstance(dy, float)
         assert isinstance(dx, float)
         assert isinstance(sad, float)
+
+
+class TestFindBestOffset:
+    @pytest.fixture
+    def dummy_pyramid(self):
+        """Creates dummy luma proxies for 3 pyramid levels."""
+        return (
+            np.zeros((32, 32), dtype=np.float32),  # Level 0 (1x)
+            np.zeros((16, 16), dtype=np.float32),  # Level 1 (0.5x)
+            np.zeros((8, 8), dtype=np.float32),  # Level 2 (0.25x)
+        )
+
+    @pytest.fixture
+    def noise_params(self):
+        return {"scales": np.array([0.01]), "offsets": np.array([0.001]), "scaler": 1.0}
+
+    def test_coordinate_scaling_and_flow(self, dummy_pyramid, noise_params):
+        """Verify that coarse-level results are correctly multiplied by 2 when passed as hints to the next level."""
+        L0, L1, L2 = dummy_pyramid
+
+        # We need to mock both the integer search and the final float refinement
+        with (
+            patch("pipeline_steps.align_and_merge.find_best_integer_offset") as mock_int,
+            patch("pipeline_steps.align_and_merge.find_best_float_offset") as mock_float,
+        ):
+            # Setup mock returns: (dy, dx, sad)
+            # Level 2 returns (1, 1, 0.5)
+            # Level 1 should then receive hint (2, 2)
+            # Level 0 should then receive hint (Level 1 result * 2)
+            mock_int.side_effect = [
+                (1, 1, 0.5),  # Level 2 result
+                (2, 2, 0.3),  # Level 1 result
+                (4, 4, 0.1),  # Level 0 result
+            ]
+            mock_float.return_value = (4.25, 4.25, 0.1)
+
+            # Use .py_func to bypass JIT for the coordinator function
+            result = find_best_offset.py_func(
+                L0,
+                L1,
+                L2,
+                L0,
+                L1,
+                L2,
+                row_start=16,
+                col_start=16,
+                tile_size=8,
+                search_radius=16,
+                noise_scales=noise_params["scales"],
+                noise_offsets=noise_params["offsets"],
+                exposure_scaler=noise_params["scaler"],
+            )
+
+            # Check Level 2 call (row_start // 4 = 4)
+            assert mock_int.call_args_list[0].kwargs["row_start"] == 4
+
+            # Check Level 1 hint scaling (L2 result * 2)
+            assert mock_int.call_args_list[1].kwargs["hint_dy"] == 2
+
+            # Check Level 0 hint scaling (L1 result * 2)
+            assert mock_int.call_args_list[2].kwargs["hint_dy"] == 4
+
+            assert result == (4.25, 4.25, 0.1)
+
+    def test_noise_floor_math_stability(self, dummy_pyramid, noise_params):
+        """Verify inv_sigma calculation doesn't crash with zero inputs and applies the proxy_variance_scale."""
+        L0, L1, L2 = dummy_pyramid  # All zeros
+
+        with (
+            patch("pipeline_steps.align_and_merge.find_best_integer_offset") as mock_int,
+            patch("pipeline_steps.align_and_merge.find_best_float_offset") as mock_float,
+        ):
+            mock_int.return_value = (0, 0, 0.0)
+            mock_float.return_value = (0.0, 0.0, 0.0)
+
+            # Test with very high noise to see if it propagates to inv_sigma
+            find_best_offset.py_func(
+                L0,
+                L1,
+                L2,
+                L0,
+                L1,
+                L2,
+                0,
+                0,
+                8,
+                4,
+                noise_scales=np.array([1.0]),
+                noise_offsets=np.array([1.0]),
+                exposure_scaler=1.0,
+            )
+
+            # Retrieve the inv_sigma passed to the first call
+            passed_inv_sigma = mock_int.call_args_list[0].kwargs["inv_sigma"]
+
+            # With mean 0, var = (1*0 + 1) + (1*1*0 + 1^2*1) = 2.0
+            # sigma_sq = 2.0 * 0.29 (proxy_variance_scale) = 0.58
+            # inv_sigma = 1 / sqrt(0.58) approx 1.31
+            assert 1.3 < passed_inv_sigma < 1.32
 
 
 # ----------------------------------------- Merging Functions -----------------------------------------
