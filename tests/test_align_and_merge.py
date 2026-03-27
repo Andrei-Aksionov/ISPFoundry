@@ -562,6 +562,135 @@ class TestFindSubpixelShift:
         assert isinstance(dx, float)
 
 
+class TestComputeTileSad:
+    def test_perfect_alignment_zero_sad(self):
+        """If images are identical and aligned, SAD should be 0.0."""
+        ref = np.full((100, 100), 0.5, dtype=np.float32)
+        tgt = np.full((100, 100), 0.5, dtype=np.float32)
+
+        # Tile at (10, 10), size 16, no offset
+        score = compute_tile_sad(0, 0, ref, tgt, 10, 10, 16, 1.0)
+
+        assert score == 0.0
+
+    def test_sad_normalization_with_inv_sigma(self):
+        """Verify that inv_sigma and area normalization are applied correctly."""
+        tile_size = 4
+        inv_sigma = 10.0  # sigma = 0.1
+        diff = 0.2
+
+        # Create 4x4 tile where every pixel has a difference of 0.2
+        ref = np.zeros((10, 10), dtype=np.float32)
+        tgt = np.full((10, 10), diff, dtype=np.float32)
+
+        score = compute_tile_sad(0, 0, ref, tgt, 0, 0, tile_size, inv_sigma)
+
+        # Sum of Abs Diff = 0.2 * 16 pixels = 3.2
+        # Area Normalization = 3.2 / 16 = 0.2
+        # Sigma Normalization = 0.2 * 10 = 2.0
+        np.testing.assert_allclose(score, 2.0, rtol=1e-6)
+
+    def test_saturation_skipping(self):
+        """Pixels above the threshold should be ignored in the calculation."""
+        # 2x2 tile
+        ref = np.array([[0.1, 0.99], [0.1, 0.1]], dtype=np.float32)  # 0.99 is saturated
+        tgt = np.array([[0.2, 0.99], [0.2, 0.2]], dtype=np.float32)
+
+        # threshold = 0.95. Only 3 pixels should count.
+        # SAD = |0.1-0.2| + |0.1-0.2| + |0.1-0.2| = 0.3
+        # Count is 3
+        # Expected = (0.3 * 1.0) / 3 = 0.1
+        score = compute_tile_sad(0, 0, ref, tgt, 0, 0, 2, 1.0, saturation_threshold=0.95)
+
+        np.testing.assert_allclose(score, 0.1, rtol=1e-6)
+
+    def test_insufficient_data_returns_none(self):
+        """If more than 75% of pixels are saturated, return None."""
+        ref = np.full((4, 4), 0.99, dtype=np.float32)
+        tgt = np.full((4, 4), 0.99, dtype=np.float32)
+
+        score = compute_tile_sad(0, 0, ref, tgt, 0, 0, 4, 1.0, saturation_threshold=0.95)
+
+        assert score is None
+
+    def test_boundary_clipping_and_offset(self):
+        """Test that the function handles tiles partially outside the image via offsets. Use values below 0.95 to avoid the saturation check returning None."""
+        # 20x20 images with valid (non-saturated) data
+        ref = np.full((20, 20), 0.5, dtype=np.float32)
+        tgt = np.full((20, 20), 0.5, dtype=np.float32)
+
+        # Tile size 8, Offset -2.
+        # Intersection is 6 rows x 8 cols = 48 valid pixels.
+        score = compute_tile_sad(
+            row_offset=-2,
+            col_offset=0,
+            reference_proxy=ref,
+            target_proxy=tgt,
+            row_start=0,
+            col_start=0,
+            tile_size=8,
+            inv_sigma=1.0,
+        )
+
+        # Now score should be 0.0 (perfect match of 0.5 values)
+        assert score is not None
+        np.testing.assert_allclose(score, 0.0, atol=1e-6)
+
+    def test_partial_overlap_math(self):
+        """Verify SAD math when only a portion of the tile overlaps the image."""
+        # Create a 10x10 image
+        ref = np.zeros((10, 10), dtype=np.float32)
+        tgt = np.zeros((10, 10), dtype=np.float32)
+
+        # Set a diff in the overlapping region
+        # Offset +8 means Ref[0,0] matches Tgt[8,0]
+        ref[0, 0] = 0.4
+        tgt[8, 0] = 0.0  # Diff of 0.4
+
+        # Tile size 4 at (0,0). With row_offset 8, only 2 rows overlap (8,9)
+        # Intersection size: 2 rows * 4 cols = 8 pixels
+        # Non clipped count: 8
+        # sad = 0.4 (from the one pixel diff)
+        # Expected = 0.4 / 8 = 0.05
+        score = compute_tile_sad(8, 0, ref, tgt, 0, 0, 4, 1.0)
+
+        assert score is not None
+        np.testing.assert_allclose(score, 0.05, atol=1e-6)
+
+    def test_exact_overlap_logic(self):
+        """Verification of the coordinate mapping using values below saturation."""
+        ref = np.zeros((10, 10), dtype=np.float32)
+        tgt = np.zeros((10, 10), dtype=np.float32)
+
+        # Use 0.8 to stay below the default 0.95 saturation threshold
+        val = 0.8
+        ref[5, 5] = val
+        tgt[6, 6] = val
+
+        # 1. Perfect offset: (1, 1) shift aligns Ref[5,5] with Tgt[6,6]
+        score_perfect = compute_tile_sad(1, 1, ref, tgt, 4, 4, 4, 1.0)
+        np.testing.assert_allclose(score_perfect, 0.0, atol=1e-6)
+
+        # 2. Bad offset: (0, 0) shift compares Ref[5,5]=0.8 with Tgt[5,5]=0.0
+        # AND Ref[6,6]=0.0 with Tgt[6,6]=0.8
+        score_bad = compute_tile_sad(0, 0, ref, tgt, 4, 4, 4, 1.0)
+
+        # Sum of Abs Diff should be |0.8 - 0.0| + |0.0 - 0.8| = 1.6
+        # Normalized by 16 pixels = 0.1
+        assert score_bad is not None
+        assert score_bad > 0
+        np.testing.assert_allclose(score_bad, 0.1, atol=1e-6)
+
+    def test_completely_out_of_bounds(self):
+        """If the offset pushes the tile entirely off the image, return None."""
+        ref = np.ones((10, 10), dtype=np.float32)
+        tgt = np.ones((10, 10), dtype=np.float32)
+
+        # Offset > image height
+        score = compute_tile_sad(20, 0, ref, tgt, 0, 0, 4, 1.0)
+        assert score is None
+
+
 # ----------------------------------------- Merging Functions -----------------------------------------
 class TestGetHannWindow2D:
     def test_hann_window_dimensions(self):
