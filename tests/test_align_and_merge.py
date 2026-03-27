@@ -239,7 +239,7 @@ class TestFindSharpestImageIdx:
         sharp = np.zeros((32, 32), dtype=np.uint16)
         row, col = np.indices(sharp.shape)
         mask = (row // 8 + col // 8) % 2 == 0
-        sharp[mask] = 1000
+        sharp[mask] = 1.0
 
         blurry = gaussian_filter(sharp.astype(float), sigma=4.0).astype(np.uint16)
 
@@ -253,18 +253,18 @@ class TestFindSharpestImageIdx:
     def test_prefers_short_exposure_over_sharp_long_exposure(self, base_metadata):
         """Test that the logic correctly excludes long exposures from selection, even if the long exposure appears 'sharper' due to higher signal/contrast."""
         # 1. Create a "Long Exposure" image: very sharp, high contrast
-        long_exp_img = np.zeros((32, 32), dtype=np.uint16)
+        long_exp_img = np.zeros((32, 32), dtype=np.float32)
         row, col = np.indices(long_exp_img.shape)
         mask = (row // 8 + col // 8) % 2 == 0
-        long_exp_img[mask] = 4000  # High signal
+        long_exp_img[mask] = 1.0  # High signal
         long_metadata = base_metadata.copy()
         long_metadata["ExposureTime"] = "1/250"  # 4x longer than base
 
         # 2. Create a "Short Exposure" image: slightly blurry, lower contrast
         # In a real burst, this might happen due to slight hand shake
-        short_exp_img = np.zeros((32, 32), dtype=np.uint16)
-        short_exp_img[mask] = 1000  # Lower signal
-        short_exp_img = gaussian_filter(short_exp_img.astype(float), sigma=0.8).astype(np.uint16)
+        short_exp_img = np.zeros((32, 32), dtype=np.float32)
+        short_exp_img[mask] = 0.7  # Lower signal
+        short_exp_img = gaussian_filter(short_exp_img.astype(float), sigma=0.8).astype(np.float32)
         short_metadata = base_metadata.copy()
         short_metadata["ExposureTime"] = "1/1000"
 
@@ -279,11 +279,11 @@ class TestFindSharpestImageIdx:
     def test_noise_robustness(self, base_metadata):
         """Test that Gaussian smoothing prevents sensor noise from being mistaken for sharpness."""
         # Pure noise
-        noisy = np.random.randint(400, 600, (32, 32)).astype(np.uint16)
+        noisy = np.random.uniform(0.4, 0.6, (32, 32)).astype(np.float32)
 
         # Actual structure
-        structural = np.zeros((32, 32), dtype=np.uint16)
-        structural[:16, :] = 800
+        structural = np.zeros((32, 32), dtype=np.float32)
+        structural[:16, :] = 0.8
 
         images = [noisy, structural]
         metadata = [base_metadata.copy() for _ in range(2)]
@@ -293,7 +293,7 @@ class TestFindSharpestImageIdx:
 
     def test_handles_mixed_string_and_float_exposure(self, base_metadata):
         """Ensure the parser handles both fractional strings and floats in metadata."""
-        img = np.full((32, 32), 500, dtype=np.uint16)
+        img = np.full((32, 32), 0.5, dtype=np.float32)
 
         m1 = base_metadata.copy()
         m1["ExposureTime"] = "1/500"
@@ -305,6 +305,56 @@ class TestFindSharpestImageIdx:
         metadata = [m1, m2]
 
         # Both are considered "short" (minimum), should default to first index if identical
+        best_idx = find_sharpest_image_idx(images, metadata)
+        assert best_idx == 0
+
+    def test_fallback_when_no_short_exposures_found(self, base_metadata):
+        """Ensure the function returns a valid index from the whole burst even if exposure_scalers logic fails or metadata is uniform."""
+        # Create two identical images
+        img = np.random.rand(32, 32).astype(np.float32)
+        images = [img, img]
+
+        # Metadata with same exposure (all will be 'short' by definition, but we test the logic's ability to handle the list)
+        metadata = [base_metadata.copy() for _ in range(2)]
+
+        best_idx = find_sharpest_image_idx(images, metadata)
+
+        assert best_idx in [0, 1]
+        assert isinstance(best_idx, (int, np.integer))
+
+    def test_sharpness_with_normalized_floats(self, base_metadata):
+        """Verify the function works with [0, 1] float32 images as specified in the ISP pipeline requirements."""
+        # Create a sharp edge in [0, 1] range
+        sharp_img = np.zeros((32, 32), dtype=np.float32)
+        sharp_img[:16, :] = 1.0
+
+        # Create a blurry edge
+        blurry_img = gaussian_filter(sharp_img, sigma=2.0)
+
+        images = [blurry_img, sharp_img]
+        metadata = [base_metadata.copy() for _ in range(2)]
+
+        best_idx = find_sharpest_image_idx(images, metadata)
+
+        # Index 1 should be significantly sharper (higher Laplacian variance)
+        assert best_idx == 1
+
+    def test_all_black_images(self, base_metadata):
+        """Edge case: If images are completely black (underexposed), the function should still return an index rather than crashing."""
+        black_img = np.zeros((32, 32), dtype=np.float32)
+        images = [black_img, black_img]
+        metadata = [base_metadata.copy() for _ in range(2)]
+
+        # Should not raise ZeroDivisionError or similar
+        best_idx = find_sharpest_image_idx(images, metadata)
+        assert best_idx == 0
+
+    def test_single_image_burst(self, base_metadata):
+        """Verify behavior with a burst of size 1."""
+        img = np.random.rand(32, 32).astype(np.float32)
+        images = [img]
+        metadata = [base_metadata]
+
         best_idx = find_sharpest_image_idx(images, metadata)
         assert best_idx == 0
 
