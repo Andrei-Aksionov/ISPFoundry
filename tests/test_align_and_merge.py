@@ -7,6 +7,7 @@ from pipeline_steps.align_and_merge import (
     downsample_luma_proxy,
     find_sharpest_image_idx,
     find_subpixel_shift,
+    get_exposure_scalers,
     get_hann_window_2d,
     get_luma_proxy,
     sample_raw_bilinear,
@@ -159,6 +160,71 @@ class TestDownsampleLumaProxy:
         result = downsample_luma_proxy(proxy)
         assert result.size == 1
         assert result.shape == (1, 1)
+
+
+class TestGetExposureScalers:
+    def test_scalers_math_simple(self):
+        """Verify that a 4x longer exposure results in a 0.25 scaler."""
+        metadata = [
+            {"ExposureTime": 0.01},  # Shortest (Reference)
+            {"ExposureTime": 0.04},  # 4x longer
+            {"ExposureTime": 0.02},  # 2x longer
+        ]
+
+        expected = np.array([1.0, 0.25, 0.5], dtype=np.float32)
+        result = get_exposure_scalers(metadata)
+
+        np.testing.assert_allclose(result, expected, rtol=1e-6, atol=1e-6)
+
+    def test_fractional_string_parsing(self):
+        """Verify that '1/100' style strings are parsed and scaled correctly."""
+        metadata = [
+            {"ExposureTime": "1/100"},  # 0.01
+            {"ExposureTime": "1/50"},  # 0.02
+            {"ExposureTime": "1/400"},  # 0.0025 (Shortest Reference)
+        ]
+
+        # Calculation -> (1/400) / (1/100) = 0.25
+        expected = np.array([0.25, 0.125, 1.0], dtype=np.float32)
+        result = get_exposure_scalers(metadata)
+
+        np.testing.assert_allclose(result, expected, rtol=1e-6, atol=1e-6)
+
+    def test_mixed_types_scaling(self):
+        """Ensure integers, floats, and strings are handled in a single burst."""
+        metadata = [
+            {"ExposureTime": 1},  # Integer
+            {"ExposureTime": 0.5},  # Float (Shortest)
+            {"ExposureTime": "2/1"},  # String
+        ]
+
+        expected = np.array([0.5, 1.0, 0.25], dtype=np.float32)
+        result = get_exposure_scalers(metadata)
+
+        np.testing.assert_allclose(result, expected, rtol=1e-6, atol=1e-6)
+
+    def test_identical_exposures_uniformity(self):
+        """All scalers must be 1.0 when exposure times are identical."""
+        metadata = [{"ExposureTime": 0.0333}] * 3
+        result = get_exposure_scalers(metadata)
+
+        expected = np.ones(3, dtype=np.float32)
+        np.testing.assert_allclose(result, expected, rtol=1e-6, atol=1e-6)
+
+    def test_output_metadata_consistency(self):
+        """Verify output array properties: length, type, and min value."""
+        metadata = [{"ExposureTime": 0.1}, {"ExposureTime": 0.5}, {"ExposureTime": 0.2}]
+        result = get_exposure_scalers(metadata)
+
+        assert result.dtype == np.float32
+        assert result.shape == (3,)
+        assert np.max(result) == 1.0  # Shortest must be 1.0
+
+    def test_parsing_error_on_invalid_string(self):
+        """Ensure the function raises a ValueError for un-parsable ExposureTime."""
+        metadata = [{"ExposureTime": "not_a_number"}]
+        with pytest.raises(ValueError, match="convert string to float"):
+            get_exposure_scalers(metadata)
 
 
 class TestFindSharpestImageIdx:
