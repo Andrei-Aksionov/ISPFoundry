@@ -4,6 +4,7 @@ from scipy.ndimage import gaussian_filter
 
 from pipeline_steps.align_and_merge import (
     compute_tile_sad,
+    downsample_luma_proxy,
     find_sharpest_image_idx,
     find_subpixel_shift,
     get_hann_window_2d,
@@ -42,7 +43,7 @@ class TestGetLumaProxy:
         expected_value = 250.0
 
         proxy = get_luma_proxy(raw_image, metadata)
-        assert np.isclose(proxy[0, 0], expected_value)
+        np.testing.assert_allclose(proxy[0, 0], expected_value)
 
     def test_get_luma_proxy_bayer_invariance(self):
         """Test that different Bayer patterns (BGGR vs RGGB) yield different (correct) results."""
@@ -80,7 +81,7 @@ class TestGetLumaProxy:
         proxy = get_luma_proxy(raw_image, metadata)
 
         # 0.15(R) + 0.35(G) + 0.35(G) + 0.15(B) = 1.0
-        assert np.isclose(proxy[0, 0], 1.0)
+        np.testing.assert_allclose(proxy[0, 0], 1.0)
 
     def test_get_luma_proxy_large_burst(self):
         """Test with a larger synthetic image to ensure einsum scales correctly."""
@@ -99,6 +100,65 @@ class TestGetLumaProxy:
 
         with pytest.raises(KeyError):
             get_luma_proxy(raw_image, metadata)
+
+
+class TestDownsampleLumaProxy:
+    def test_downsample_odd_dimensions(self):
+        """Verify that odd-dimensioned arrays are truncated to even before downsampling."""
+        # Input 5x7 -> Truncated to 4x6 -> Result should be 2x3
+        proxy = np.ones((5, 7), dtype=np.float32)
+        downsampled = downsample_luma_proxy(proxy)
+
+        assert downsampled.shape == (2, 3)
+
+    def test_downsample_box_averaging_math(self):
+        """Verify that a 2x2 block is averaged correctly."""
+        # Create a 2x2 block where the mean is exactly 2.5
+        proxy = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+
+        expected = np.array([[2.5]], dtype=np.float32)
+        result = downsample_luma_proxy(proxy)
+
+        np.testing.assert_allclose(result, expected)
+        assert result.shape == (1, 1)
+
+    def test_downsample_spatial_consistency(self):
+        """
+        Verify that different 2x2 quads in a larger image are averaged independently.
+
+        [[1., 1., 2., 2.],
+         [1., 1., 2., 2.],
+         [3., 3., 4., 4.],
+         [3., 3., 4., 4.]]
+        """
+        # 4x4 image with distinct values in each quadrant
+        proxy = np.zeros((4, 4), dtype=np.float32)
+        proxy[0:2, 0:2] = 1.0  # Top-left average: 1.0
+        proxy[0:2, 2:4] = 2.0  # Top-right average: 2.0
+        proxy[2:4, 0:2] = 3.0  # Bottom-left average: 3.0
+        proxy[2:4, 2:4] = 4.0  # Bottom-right average: 4.0
+
+        expected = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+
+        result = downsample_luma_proxy(proxy)
+        np.testing.assert_allclose(result, expected)
+
+    def test_downsample_identity_preservation(self):
+        """A uniform field should remain the same value after downsampling."""
+        val = 0.75
+        proxy = np.full((10, 10), val, dtype=np.float32)
+        result = downsample_luma_proxy(proxy)
+
+        np.testing.assert_equal(result, val)
+        assert result.dtype == np.float32
+
+    def test_downsample_empty_or_too_small(self):
+        """Handle cases where dimensions are smaller than a 2x2 block."""
+        proxy = np.ones((1, 1), dtype=np.float32)
+
+        result = downsample_luma_proxy(proxy)
+        assert result.size == 1
+        assert result.shape == (1, 1)
 
 
 class TestFindSharpestImageIdx:
