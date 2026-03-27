@@ -8,6 +8,7 @@ from pipeline_steps.align_and_merge import (
     compute_tile_sad,
     downsample_luma_proxy,
     estimate_noise_profile,
+    find_best_integer_offset,
     find_sharpest_image_idx,
     find_subpixel_shift,
     get_exposure_scalers,
@@ -689,6 +690,99 @@ class TestComputeTileSad:
         # Offset > image height
         score = compute_tile_sad(20, 0, ref, tgt, 0, 0, 4, 1.0)
         assert score is None
+
+
+class TestFindBestIntegerOffset:
+    def test_finds_correct_offset_within_radius(self):
+        """Verify the search finds a known shift within the radius."""
+        # 32x32 images
+        ref = np.full((32, 32), 0.2, dtype=np.float32)
+        tgt = np.full((32, 32), 0.2, dtype=np.float32)
+
+        # Place a unique feature (a small 2x2 square) in ref at (10, 10)
+        ref[10:12, 10:12] = 0.8
+        # Place it in tgt at (12, 13) -> Shift is dy=2, dx=3
+        tgt[12:14, 13:15] = 0.8
+
+        # Search around hint (0,0) with radius 4
+        # The tile being checked is at (8, 8), size 8
+        best_dy, best_dx, min_sad = find_best_integer_offset(
+            ref, tgt, row_start=8, col_start=8, tile_size=8, hint_dy=0, hint_dx=0, search_radius=4, inv_sigma=1.0
+        )
+
+        assert best_dy == 2
+        assert best_dx == 3
+        np.testing.assert_allclose(min_sad, 0.0, atol=1e-6)
+
+    def test_uses_hint_as_center(self):
+        """Verify the search window is centered on the hint, not (0,0)."""
+        ref = np.full((32, 32), 0.3, dtype=np.float32)
+        tgt = np.full((32, 32), 0.3, dtype=np.float32)
+
+        # Feature at (10, 10) in ref, (20, 20) in tgt -> True shift is 10, 10
+        ref[10, 10] = 0.7
+        tgt[20, 20] = 0.7
+
+        # Hint is (9, 9), radius is 2. Search range is [7, 11].
+        # (10, 10) is inside this range.
+        best_dy, best_dx, _ = find_best_integer_offset(
+            ref, tgt, 10, 10, 4, hint_dy=9, hint_dx=9, search_radius=2, inv_sigma=1.0
+        )
+
+        assert best_dy == 10
+        assert best_dx == 10
+
+    def test_handles_all_none_sad_gracefully(self):
+        """If every position in the search window returns None (e.g., all saturated), it should return the initial hint and the high dummy SAD value."""
+        # All saturated images (1.0 > 0.95 threshold)
+        ref = np.ones((16, 16), dtype=np.float32)
+        tgt = np.ones((16, 16), dtype=np.float32)
+
+        best_dy, best_dx, min_sad = find_best_integer_offset(
+            ref, tgt, 4, 4, 4, hint_dy=2, hint_dx=2, search_radius=1, inv_sigma=1.0
+        )
+
+        # Should stay at hint
+        assert best_dy == 2
+        assert best_dx == 2
+        assert min_sad == 1e20
+
+    def test_respects_search_radius_boundary(self):
+        """Verify it doesn't find a better match that is outside the radius."""
+        ref = np.zeros((32, 32), dtype=np.float32)
+        tgt = np.zeros((32, 32), dtype=np.float32)
+
+        # True match is at (5, 5)
+        ref[10, 10] = 0.5
+        tgt[15, 15] = 0.5
+
+        # Search with hint (0,0) and radius 2.
+        # (5, 5) is unreachable.
+        best_dy, best_dx, min_sad = find_best_integer_offset(
+            ref, tgt, 10, 10, 4, hint_dy=0, hint_dx=0, search_radius=2, inv_sigma=1.0
+        )
+
+        assert abs(best_dy) <= 2
+        assert abs(best_dx) <= 2
+        assert min_sad > 0  # Should not find the perfect match
+
+    def test_tie_breaking(self):
+        """In case of equal SAD scores, it should ideally keep the first one found (stability)."""
+        # Uniform images, every offset is a 'perfect' 0.0 match
+        ref = np.full((16, 16), 0.4, dtype=np.float32)
+        tgt = np.full((16, 16), 0.4, dtype=np.float32)
+
+        hint_y, hint_x = 1, 1
+        radius = 2
+        # Start search at hint_dy - radius = 1 - 2 = -1
+        best_dy, best_dx, _ = find_best_integer_offset(
+            ref, tgt, 4, 4, 4, hint_dy=hint_y, hint_dx=hint_x, search_radius=radius, inv_sigma=1.0
+        )
+
+        # Since the first SAD calculated (at the start of the loops) is 0.0,
+        # and the condition is `sad < min_sad`, it should return the very first offset checked.
+        assert best_dy == hint_y - radius
+        assert best_dx == hint_x - radius
 
 
 # ----------------------------------------- Merging Functions -----------------------------------------
