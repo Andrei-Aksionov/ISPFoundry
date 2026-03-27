@@ -17,6 +17,7 @@ from pipeline_steps.align_and_merge import (
     get_hann_window_2d,
     get_luma_proxy,
     get_noise_profile,
+    merge_images,
     merge_tile,
     sample_raw_bilinear,
 )
@@ -1358,3 +1359,132 @@ class TestMergeTile:
             # Verify the offset was passed through
             args, _ = mock_sample.call_args
             assert args[3] == 0.5  # row_offset
+
+
+class TestMergeImages:
+    @pytest.fixture
+    def mock_burst(self):
+        # Two 64x64 dummy images
+        img1 = np.full((64, 64), 0.2, dtype=np.float32)
+        img2 = np.full((64, 64), 0.2, dtype=np.float32)
+        return [img1, img2]
+
+    @pytest.fixture
+    def mock_metadata(self):
+        return [
+            {"ExposureTime": 0.01, "ISO": 100, "BlackLevel": 0, "color_desc": "RGBG", "raw_pattern": [[2, 3], [1, 0]]},
+            {"ExposureTime": 0.01, "ISO": 100, "BlackLevel": 0, "color_desc": "RGBG", "raw_pattern": [[2, 3], [1, 0]]},
+        ]
+
+    def test_input_validation(self, mock_burst, mock_metadata):
+        """Ensure the function catches bad inputs before starting the heavy lifting."""
+        # Test: Only one image
+        with pytest.raises(ValueError, match="At least two images"):
+            merge_images(mock_burst[:1], mock_metadata[:1])
+
+        # Test: Inconsistent shapes
+        bad_burst = [np.zeros((64, 64)), np.zeros((32, 32))]
+        with pytest.raises(ValueError, match="same shape"):
+            merge_images(bad_burst, mock_metadata)
+
+        # Test: Bad search radius
+        with pytest.raises(ValueError, match="multiple of 8"):
+            merge_images(mock_burst, mock_metadata, max_search_radius=7)
+
+    def test_sharpest_image_selection_logic(self, mock_burst, mock_metadata):
+        # 1. Ensure unique objects
+        img_target = mock_burst[0]
+        img_ref = mock_burst[1]
+
+        # 2. Force index 1 to be the "sharpest"
+        with (
+            patch("pipeline_steps.align_and_merge.find_sharpest_image_idx", return_value=1),
+            patch("pipeline_steps.align_and_merge._parallel_tile_processor") as mock_proc,
+            patch("pipeline_steps.align_and_merge.get_luma_proxy", return_value=np.zeros((32, 32))),
+            patch("pipeline_steps.align_and_merge.get_noise_profile", return_value=(np.zeros(1), np.zeros(1))),
+            patch("pipeline_steps.align_and_merge.get_exposure_scalers", return_value=[1.0, 1.0]),
+            patch("pipeline_steps.align_and_merge.get_hann_window_2d", return_value=np.ones((32, 32))),
+        ):
+            # No .py_func needed if merge_images isn't @njit
+            merge_images(mock_burst, mock_metadata)
+
+            calls = mock_proc.call_args_list
+            assert len(calls) == 2
+
+            # Since the loop goes 0 -> 1:
+            # Call 0 should be index 0 (Target)
+            # Call 1 should be index 1 (Reference)
+
+            # Inspect Call for index 0
+            args0, kwargs0 = calls[0]
+            assert kwargs0["is_reference"] is False
+            assert kwargs0["target_image"] is img_target  # Checking identity
+
+            # Inspect Call for index 1
+            args1, kwargs1 = calls[1]
+            assert kwargs1["is_reference"] is True
+            assert kwargs1["target_image"] is img_ref  # Checking identity
+
+    def test_normalization_step(self, mock_burst, mock_metadata):
+        """Ensure the final division by weights_accumulator happens correctly."""
+        # Create a tiny 16x16 scenario
+        img = np.full((16, 16), 0.5, dtype=np.float32)
+        burst = [img, img]
+
+        # We mock the parallel processor to manually fill the accumulators
+        def mock_fill(**kwargs):
+            kwargs["merged_accumulator"] += 1.0  # Add 1.0 to every pixel
+            kwargs["weights_accumulator"] += 2.0  # Total weight is 2.0
+
+        with (
+            patch("pipeline_steps.align_and_merge._parallel_tile_processor", side_effect=mock_fill),
+            patch("pipeline_steps.align_and_merge.get_luma_proxy", return_value=np.zeros((8, 8))),
+            patch("pipeline_steps.align_and_merge.get_noise_profile", return_value=(np.array([0]), np.array([0]))),
+        ):
+            result = merge_images(burst, mock_metadata, tile_size=8)
+
+            # Final result should be 1.0 / 2.0 = 0.5 across the whole image
+            assert np.allclose(result, 0.5)
+
+    def test_k_adaptive_scaling(self, mock_burst, mock_metadata):
+        """Verify that higher ISO results in a larger (more trusting) k_adaptive."""
+        # ISO 100 -> stops = 0 -> k = 1.0
+        # ISO 400 -> stops = 2 -> k = 1.0 + 0.5*2 = 2.0
+        mock_metadata[0]["ISO"] = 400
+
+        with (
+            patch("pipeline_steps.align_and_merge._parallel_tile_processor") as mock_proc,
+            patch("pipeline_steps.align_and_merge.get_luma_proxy", return_value=np.zeros((32, 32))),
+            patch("pipeline_steps.align_and_merge.get_noise_profile", return_value=(np.array([0]), np.array([0]))),
+        ):
+            merge_images(mock_burst, mock_metadata)
+
+            # Check the k_adaptive passed to the processor
+            passed_k = mock_proc.call_args.kwargs["k_adaptive"]
+            assert passed_k == 2.0
+
+    def test_image_consistency_with_offsets(self, mock_metadata):
+        shape = (128, 128)
+        # 1. Use a larger, more distinct feature
+        # A 40x40 square is much easier for a 32x32 tile to "see"
+        ref = np.zeros(shape, dtype=np.float32)
+        ref[40:80, 40:80] = 1.0
+
+        # 2. Shift it by a clean integer amount first to verify basic alignment
+        # Shift of 4 is safe for a search_radius of 16
+        tgt = np.zeros(shape, dtype=np.float32)
+        tgt[44:84, 44:84] = 1.0
+
+        # 3. Add just enough noise to satisfy the estimator, but not enough to ruin SAD
+        noise = np.random.normal(0, 0.001, shape).astype(np.float32)
+        burst = [ref + noise, tgt + noise]
+
+        metadata = [mock_metadata[0], mock_metadata[1]]
+
+        # 4. Run merger
+        merged = merge_images(burst, metadata, tile_size=32, max_search_radius=16)
+
+        # Check a point that should be 1.0 in BOTH shifted and original
+        # If alignment worked, (45, 45) should be ~1.0.
+        # If it failed, it would be ~0.5 (averaging 1.0 and 0.0) or 0.0.
+        assert merged[45, 45] > 0.8, f"Value was {merged[45, 45]} - Alignment likely failed"
