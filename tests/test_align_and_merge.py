@@ -17,6 +17,7 @@ from pipeline_steps.align_and_merge import (
     get_hann_window_2d,
     get_luma_proxy,
     get_noise_profile,
+    merge_tile,
     sample_raw_bilinear,
 )
 
@@ -1206,3 +1207,154 @@ class TestSampleRawBilinear:
         # bottom_mix = 300 + 0.75 * (400 - 300) = 375
         # final = 175 + 0.75 * (375 - 175) = 325.0
         assert np.isclose(val_granular, 325.0)
+
+
+class TestMergeTile:
+    @pytest.fixture
+    def accumulators(self):
+        # 16x16 buffers
+        merged = np.zeros((16, 16), dtype=np.float32)
+        weights = np.zeros((16, 16), dtype=np.float32)
+        return merged, weights
+
+    @pytest.fixture
+    def window(self):
+        # Simple flat window (all 1s) for easier math verification
+        return np.ones((8, 8), dtype=np.float32)
+
+    def test_reference_frame_merge(self, accumulators, window):
+        """The reference frame should be merged with a robustness of 1.0 and no SNR scaling."""
+        merged_acc, weights_acc = accumulators
+        target = np.full((16, 16), 0.5, dtype=np.float32)
+
+        # Merge an 8x8 tile at (0,0) as reference
+        # Note: we use .py_func if merge_tile is jitted
+        merge_tile.py_func(
+            merged_acc,
+            weights_acc,
+            target,
+            row_start=0,
+            col_start=0,
+            row_offset=0.0,
+            col_offset=0.0,
+            sad_score=0.0,
+            tile_size=8,
+            blending_window=window,
+            k=1.0,
+            exposure_scaler=1.0,
+            is_reference=True,
+        )
+
+        # Reference pixels should be exactly 0.5, weights exactly 1.0
+        assert np.all(weights_acc[:8, :8] == 1.0)
+        assert np.all(merged_acc[:8, :8] == 0.5)
+
+    def test_exposure_normalization(self, accumulators, window):
+        """Target frame at 0.25 brightness with scaler 2.0 should result in 0.5 in accumulator."""
+        merged_acc, weights_acc = accumulators
+        target = np.full((16, 16), 0.25, dtype=np.float32)
+
+        # exposure_scaler=2.0 means target is 1 stop darker than reference
+        # robustness k is high so exp(-0.1/10) is approx 1.0
+        merge_tile.py_func(
+            merged_acc,
+            weights_acc,
+            target,
+            row_start=0,
+            col_start=0,
+            row_offset=0.0,
+            col_offset=0.0,
+            sad_score=0.0,
+            tile_size=8,
+            blending_window=window,
+            k=100.0,
+            exposure_scaler=2.0,
+            is_reference=False,
+        )
+
+        # SNR weight for darker frame (scaler 2.0) = 1/2 = 0.5
+        # Pixel value added = (0.25 * 2.0) * 0.5 = 0.25
+        # Total weight = 0.5
+        # Resulting average (merged/weight) would be 0.5.
+        assert weights_acc[0, 0] == 0.5
+        assert merged_acc[0, 0] == 0.25
+
+    def test_saturation_soft_threshold(self, accumulators, window):
+        """Pixels near saturation should have their weights tapered off."""
+        merged_acc, weights_acc = accumulators
+        # 0.93 is in the 'danger zone' (threshold 0.95 - softness 0.05 = 0.90)
+        target = np.full((16, 16), 0.93, dtype=np.float32)
+
+        merge_tile.py_func(
+            merged_acc,
+            weights_acc,
+            target,
+            row_start=0,
+            col_start=0,
+            row_offset=0.0,
+            col_offset=0.0,
+            sad_score=0.0,
+            tile_size=8,
+            blending_window=window,
+            k=100.0,
+            exposure_scaler=1.0,
+            saturation_threshold=0.95,
+            is_reference=False,
+        )
+
+        # Fade calculation: (0.95 - 0.93) / 0.05 = 0.4
+        # Since snr_weight=1 and robustness=1, total weight should be 0.4
+        np.testing.assert_allclose(weights_acc[0, 0], 0.4, atol=1e-5)
+
+    def test_robustness_rejection(self, accumulators, window):
+        """Tiles with very high SAD scores (mismatches) should not be merged."""
+        merged_acc, weights_acc = accumulators
+        target = np.ones((16, 16), dtype=np.float32)
+
+        # SAD=10 with k=1.0 -> exp(-10) = 0.000045 (below 1e-4 threshold)
+        merge_tile.py_func(
+            merged_acc,
+            weights_acc,
+            target,
+            row_start=0,
+            col_start=0,
+            row_offset=0.0,
+            col_offset=0.0,
+            sad_score=10.0,
+            tile_size=8,
+            blending_window=window,
+            k=1.0,
+            exposure_scaler=1.0,
+            is_reference=False,
+        )
+
+        assert np.all(weights_acc == 0)
+        assert np.all(merged_acc == 0)
+
+    def test_bilinear_sampling_integration(self, accumulators, window):
+        """Verify that the function correctly calls the bilinear sampler with offsets."""
+        merged_acc, weights_acc = accumulators
+        target = np.zeros((16, 16), dtype=np.float32)
+
+        # We mock the sampler to ensure it's receiving the correct float offsets
+        with patch("pipeline_steps.align_and_merge.sample_raw_bilinear", return_value=0.7) as mock_sample:
+            merge_tile.py_func(
+                merged_acc,
+                weights_acc,
+                target,
+                row_start=2,
+                col_start=2,
+                row_offset=0.5,
+                col_offset=0.5,
+                sad_score=0.0,
+                tile_size=4,
+                blending_window=np.ones((4, 4)),
+                k=1.0,
+                exposure_scaler=1.0,
+            )
+
+            # Should be called for every pixel in the 4x4 tile
+            assert mock_sample.call_count == 16
+            # Verify the offset was passed through
+            args, _ = mock_sample.call_args
+            assert args[3] == 0.5  # row_offset
