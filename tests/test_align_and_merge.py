@@ -494,6 +494,74 @@ class TestEstimateNoiseProfile:
 # ---------------------------------------- Aligning Functions ----------------------------------------
 
 
+class TestFindSubpixelShift:
+    def test_perfect_center(self):
+        """If the center is much lower than its neighbors and they are balanced, shift should be 0."""
+        grid = np.array([[1.0, 1.0, 1.0], [1.0, 0.0, 1.0], [1.0, 1.0, 1.0]], dtype=np.float32)
+
+        dy, dx = find_subpixel_shift(grid)
+
+        # dy = (1 - 1) / (2 * (1 + 1 - 0)) = 0
+        np.testing.assert_allclose(dy, 0.0, rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(dx, 0.0, rtol=1e-6, atol=1e-6)
+
+    def test_known_fractional_shift(self):
+        """
+        Test a known parabolic offset.
+
+        For f(x) = ax^2 + bx + c, the vertex is at -b / 2a.
+        If we set Up=2, Center=1, Down=4:
+        f(-1)=2, f(0)=1, f(1)=4
+        denom = 2 * (2 + 4 - 2) = 8
+        offset = (2 - 4) / 8 = -0.25
+        """
+        grid = np.array([[0, 2.0, 0], [0, 1.0, 0], [0, 4.0, 0]], dtype=np.float32)
+
+        dy, dx = find_subpixel_shift(grid)
+
+        np.testing.assert_allclose(dy, -0.25, rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(dx, 0.0, rtol=1e-6, atol=1e-6)
+
+    def test_clamping_logic(self):
+        """If the neighbors suggest a vertex far outside the center pixel, it should clamp to [-0.5, 0.5]."""
+        # Heavily asymmetrical: Center=10, Left=11, Right=100
+        # denom = 2 * (11 + 100 - 20) = 182
+        # offset = (11 - 100) / 182 = -89 / 182 approx -0.489
+        # Let's force an even more extreme case:
+        grid = np.array(
+            [
+                [0, 10, 0],
+                [10, 10, 50],  # Right is very high, suggesting vertex is way to the left
+                [0, 10, 0],
+            ],
+            dtype=np.float32,
+        )
+
+        # denom = 2 * (10 + 50 - 20) = 80
+        # dx = (10 - 50) / 80 = -0.5
+        dy, dx = find_subpixel_shift(grid)
+
+        assert -0.5 <= dy <= 0.5
+        assert -0.5 <= dx <= 0.5
+
+    def test_divide_by_zero_robustness(self):
+        """If the surface is flat (denominator is 0), it should return 0 offset."""
+        grid = np.full((3, 3), 10.0, dtype=np.float32)
+
+        dy, dx = find_subpixel_shift(grid)
+
+        np.testing.assert_allclose(dy, 0.0, rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(dx, 0.0, rtol=1e-6, atol=1e-6)
+
+    def test_output_types(self):
+        """Ensure the function returns a tuple of standard floats."""
+        grid = np.random.rand(3, 3).astype(np.float32)
+        dy, dx = find_subpixel_shift(grid)
+
+        assert isinstance(dy, float)
+        assert isinstance(dx, float)
+
+
 # ----------------------------------------- Merging Functions -----------------------------------------
 class TestGetHannWindow2D:
     def test_hann_window_dimensions(self):
