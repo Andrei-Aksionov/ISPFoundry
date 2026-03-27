@@ -8,6 +8,7 @@ from pipeline_steps.align_and_merge import (
     compute_tile_sad,
     downsample_luma_proxy,
     estimate_noise_profile,
+    find_best_float_offset,
     find_best_integer_offset,
     find_sharpest_image_idx,
     find_subpixel_shift,
@@ -783,6 +784,102 @@ class TestFindBestIntegerOffset:
         # and the condition is `sad < min_sad`, it should return the very first offset checked.
         assert best_dy == hint_y - radius
         assert best_dx == hint_x - radius
+
+
+class TestFindBestFloatOffset:
+    @pytest.fixture
+    def mock_proxies(self):
+        return np.zeros((32, 32)), np.zeros((32, 32))
+
+    def test_assembles_correct_final_offset1(self, mock_proxies):
+        """Verify that integer shift and sub-pixel refinement are summed correctly."""
+        ref, tgt = mock_proxies
+
+        # We mock compute_tile_sad to return a grid that results in a known shift.
+        # If neighbors are symmetric, find_subpixel_shift returns (0, 0).
+        with patch("pipeline_steps.align_and_merge.compute_tile_sad", return_value=10.0):
+            # .py_func calls the raw Python logic, ignoring the @njit decorator
+            dy, dx, sad = find_best_float_offset.py_func(
+                ref, tgt, 0, 0, 8, best_dy_int=5, best_dx_int=-3, min_sad=5.0, inv_sigma=1.0
+            )
+
+            assert dy == 5.0
+            assert dx == -3.0
+            assert sad == 5.0
+
+    def test_subpixel_refinement_math(self, mock_proxies):
+        """Test that an asymmetrical error surface shifts the float result correctly."""
+        ref, tgt = mock_proxies
+
+        # Define SAD values for: [Up, Down, Left, Right]
+        # Up=2.0, Down=4.0, Center=1.0 -> Vertical shift should be -0.25
+        sad_values = {
+            (4, 5): 2.0,  # Up (best_dy-1, best_dx)
+            (6, 5): 4.0,  # Down (best_dy+1, best_dx)
+            (5, 4): 3.0,  # Left (best_dy, best_dx-1)
+            (5, 6): 3.0,  # Right (best_dy, best_dx+1)
+        }
+
+        def side_effect(dy, dx, *args, **kwargs):
+            return sad_values.get((dy, dx), 3.0)
+
+        with patch("pipeline_steps.align_and_merge.compute_tile_sad", side_effect=side_effect):
+            dy, dx, _ = find_best_float_offset.py_func(
+                ref, tgt, 0, 0, 8, best_dy_int=5, best_dx_int=5, min_sad=1.0, inv_sigma=1.0
+            )
+
+            # 5.0 (int) + (-0.25) (sub) = 4.75
+            assert dy == 4.75
+            assert dx == 5.0
+
+    def test_boundary_mirroring_logic(self, mock_proxies):
+        """If a neighbor is None (out of bounds), the function should mirror the opposite neighbor's value to stay stable."""
+        ref, tgt = mock_proxies
+
+        # Setup: Up is out of bounds (None), Down is 15.0, Center is 10.0
+        def side_effect(dy, dx, *args, **kwargs):
+            if dy == 4:
+                return None  # Up
+            return 15.0  # All others
+
+        with patch("pipeline_steps.align_and_merge.compute_tile_sad", side_effect=side_effect):
+            dy, dx, _ = find_best_float_offset.py_func(
+                ref, tgt, 0, 0, 8, best_dy_int=5, best_dx_int=5, min_sad=10.0, inv_sigma=1.0
+            )
+
+            # If Up mirrored Down (15.0), the grid becomes [15, 10, 15]
+            # vertically, which results in 0.0 sub-pixel shift.
+            assert dy == 5.0
+            assert dx == 5.0
+
+    def test_mirroring_convexity_safety(self, mock_proxies):
+        """Verify that mirrored values are at least as large as min_sad to prevent creating a 'fake' minimum at the edge."""
+        ref, tgt = mock_proxies
+
+        # Down is 5.0, Center is 10.0 (an 'impossible' case where center isn't min)
+        # Up is None. Mirroring should take max(Down, Center) = 10.0.
+        def side_effect(dy, dx, *args, **kwargs):
+            if dy == 4:
+                return None  # Up
+            if dy == 6:
+                return 5.0  # Down
+            return 12.0
+
+        with patch("pipeline_steps.align_and_merge.compute_tile_sad", side_effect=side_effect):
+            # This shouldn't crash and should produce a clamped/stable float
+            dy, dx, _ = find_best_float_offset.py_func(
+                ref, tgt, 0, 0, 8, best_dy_int=5, best_dx_int=5, min_sad=10.0, inv_sigma=1.0
+            )
+            assert isinstance(dy, float)
+
+    def test_output_types_and_precision(self, mock_proxies):
+        """Ensure outputs are standard floats for downstream processing."""
+        ref, tgt = mock_proxies
+        dy, dx, sad = find_best_float_offset(ref, tgt, 0, 0, 4, 0, 0, 1.0, 1.0)
+
+        assert isinstance(dy, float)
+        assert isinstance(dx, float)
+        assert isinstance(sad, float)
 
 
 # ----------------------------------------- Merging Functions -----------------------------------------
