@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 import numpy as np
 import pytest
 from scipy.ndimage import gaussian_filter
@@ -10,8 +12,11 @@ from pipeline_steps.align_and_merge import (
     get_exposure_scalers,
     get_hann_window_2d,
     get_luma_proxy,
+    get_noise_profile,
     sample_raw_bilinear,
 )
+
+# --------------------------------- Luma Proxy & Exposure Functions ----------------------------------
 
 
 class TestGetLumaProxy:
@@ -359,6 +364,86 @@ class TestFindSharpestImageIdx:
         assert best_idx == 0
 
 
+# ------------------------------------ Noise Estimation Functions ------------------------------------
+
+
+class TestGetNoiseProfile:
+    @pytest.fixture
+    def sample_metadata(self):
+        return {
+            "CFAPlaneColor": "Red,Green,Blue",
+            # 3 pairs of (Scale, Offset): R=(0.01, 0.001), G=(0.02, 0.002), B=(0.03, 0.003)
+            "NoiseProfile": "0.01 0.001 0.02 0.002 0.03 0.003",
+            "color_desc": "RGBG",
+            "raw_pattern": [[0, 1], [3, 2]],  # RGGB: 0=R, 1=G, 3=G, 2=B
+        }
+
+    def test_parse_dng_noise_profile_mapping(self, sample_metadata):
+        """Verify that NoiseProfile string is correctly mapped to the 2x2 Bayer grid."""
+        image = np.zeros((10, 10), dtype=np.float32)
+
+        scales, offsets = get_noise_profile(image, sample_metadata)
+
+        # Expected Scales (RGGB): R=0.01, G=0.02, G=0.02, B=0.03
+        expected_scales = np.array([[0.01, 0.02], [0.02, 0.03]], dtype=np.float32)
+
+        # Expected Offsets (RGGB): R=0.001, G=0.002, G=0.002, B=0.003
+        expected_offsets = np.array([[0.001, 0.002], [0.002, 0.003]], dtype=np.float32)
+
+        np.testing.assert_allclose(scales, expected_scales, rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(offsets, expected_offsets, rtol=1e-6, atol=1e-6)
+        assert scales.dtype == np.float32
+        assert offsets.dtype == np.float32
+
+    def test_different_bayer_phase_mapping(self, sample_metadata):
+        """Verify mapping works correctly for a different Bayer phase (e.g., BGGR)."""
+        image = np.zeros((10, 10), dtype=np.float32)
+        # Change pattern to BGGR: 2=B, 1=G, 3=G, 0=R
+        sample_metadata["raw_pattern"] = [[2, 1], [3, 0]]
+
+        scales, offsets = get_noise_profile(image, sample_metadata)
+
+        # Top-left should now be Blue scale (0.03)
+        assert scales[0, 0] == 0.03
+        # Bottom-right should be Red scale (0.01)
+        assert scales[1, 1] == 0.01
+        np.testing.assert_allclose(scales, [[0.03, 0.02], [0.02, 0.01]])
+        np.testing.assert_allclose(offsets, [[0.003, 0.002], [0.002, 0.001]])
+
+    def test_invalid_cfa_plane_color(self, sample_metadata):
+        """Ensure ValueError is raised if CFAPlaneColor is not Red,Green,Blue."""
+        sample_metadata["CFAPlaneColor"] = "Cyan,Magenta,Yellow"
+        image = np.zeros((4, 4))
+
+        with pytest.raises(ValueError, match="The code expects that the matrix layout is Red Green Blue"):
+            get_noise_profile(image, sample_metadata)
+
+    def test_fallback_to_estimation(self, sample_metadata):
+        """Verify that estimate_noise_profile is called if NoiseProfile is missing."""
+        # Remove NoiseProfile from metadata
+        del sample_metadata["NoiseProfile"]
+        image = np.random.rand(10, 10).astype(np.float32)
+
+        # Mocking the estimation function to verify it's reached
+        with patch("pipeline_steps.align_and_merge.estimate_noise_profile") as mock_estimate:
+            mock_estimate.return_value = (np.ones((2, 2)), np.zeros((2, 2)))
+
+            get_noise_profile(image, sample_metadata)
+            mock_estimate.assert_called_once_with(image)
+
+    def test_malformed_noise_profile_string(self, sample_metadata):
+        """Ensure it raises an error if the NoiseProfile string is incomplete."""
+        sample_metadata["NoiseProfile"] = "0.01 0.001"  # Only 2 values instead of 6
+        image = np.zeros((4, 4))
+
+        with pytest.raises(IndexError):
+            get_noise_profile(image, sample_metadata)
+
+
+# ---------------------------------------- Aligning Functions ----------------------------------------
+
+
+# ----------------------------------------- Merging Functions -----------------------------------------
 class TestGetHannWindow2D:
     def test_hann_window_dimensions(self):
         """Ensure the window matches the requested tile size."""
