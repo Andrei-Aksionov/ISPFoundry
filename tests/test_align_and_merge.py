@@ -69,6 +69,37 @@ class TestGetLumaProxy:
         proxy = get_luma_proxy(raw_image, metadata)
         assert proxy.dtype == np.float32
 
+    def test_get_luma_proxy_normalization(self):
+        """Verify that a pure white 2x2 quad results in 1.0 (unit energy conservation)."""
+        raw_image = np.ones((2, 2), dtype=np.float32)
+        metadata = {
+            "color_desc": "RGBG",
+            "raw_pattern": [[0, 1], [3, 2]],  # RGGB
+        }
+
+        proxy = get_luma_proxy(raw_image, metadata)
+
+        # 0.15(R) + 0.35(G) + 0.35(G) + 0.15(B) = 1.0
+        assert np.isclose(proxy[0, 0], 1.0)
+
+    def test_get_luma_proxy_large_burst(self):
+        """Test with a larger synthetic image to ensure einsum scales correctly."""
+        raw_image = np.random.rand(128, 128).astype(np.float32)
+        metadata = {"color_desc": "RGBG", "raw_pattern": [[0, 1], [3, 2]]}
+
+        proxy = get_luma_proxy(raw_image, metadata)
+        assert proxy.shape == (64, 64)
+        assert not np.any(np.isnan(proxy))
+
+    def test_invalid_color_desc(self):
+        """Ensure it raises KeyError if a color in pattern isn't in color_weights."""
+        raw_image = np.zeros((2, 2), dtype=np.float32)
+        # 'X' is not in color_weights dict
+        metadata = {"color_desc": "RGBX", "raw_pattern": [[0, 1], [3, 2]]}
+
+        with pytest.raises(KeyError):
+            get_luma_proxy(raw_image, metadata)
+
 
 class TestFindSharpestImageIdx:
     @pytest.fixture
