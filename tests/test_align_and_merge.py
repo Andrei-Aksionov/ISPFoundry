@@ -7,6 +7,7 @@ from scipy.ndimage import gaussian_filter
 from pipeline_steps.align_and_merge import (
     compute_tile_sad,
     downsample_luma_proxy,
+    estimate_noise_profile,
     find_sharpest_image_idx,
     find_subpixel_shift,
     get_exposure_scalers,
@@ -438,6 +439,56 @@ class TestGetNoiseProfile:
 
         with pytest.raises(IndexError):
             get_noise_profile(image, sample_metadata)
+
+
+class TestEstimateNoiseProfile:
+    def test_estimate_noise_fallback_on_flat_field(self):
+        """Verify that the function returns default fallback values when it can't find enough variance bins (e.g., a perfectly flat constant image)."""
+        # A perfectly flat image has 0 variance, linregress will fail or
+        # there won't be enough unique bins.
+        flat_img = np.full((128, 128), 0.5, dtype=np.float32)
+
+        scales, offsets = estimate_noise_profile(flat_img, patch_size=8)
+
+        # Fallback values from the code: scale=1e-4, offset=1e-6
+        expected_scales = np.full((2, 2), 1e-4, dtype=np.float32)
+        expected_offsets = np.full((2, 2), 1e-6, dtype=np.float32)
+
+        np.testing.assert_allclose(scales, expected_scales, rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(offsets, expected_offsets, rtol=1e-6, atol=1e-6)
+
+    def test_estimate_noise_clipping_safety(self):
+        """Ensure that the function handles negative intercepts (physically impossible) by clipping them to the defined minimums (1e-7 and 1e-9)."""
+        # Create an image where variance decreases as signal increases (impossible noise)
+        # This should force a negative slope/intercept in a naive regression.
+        h, w = 256, 256
+        img = np.random.rand(h, w).astype(np.float32)
+
+        scales, offsets = estimate_noise_profile(img, patch_size=16)
+
+        # Check that we are at least at the minimum floor
+        assert np.all(scales >= 1e-7)
+        assert np.all(offsets >= 1e-9)
+
+    def test_estimate_noise_patch_size_consistency(self):
+        """Test that different patch sizes still return the correct grid shape."""
+        img = np.random.rand(256, 256).astype(np.float32)
+
+        scales, _ = estimate_noise_profile(img, patch_size=16)
+        assert scales.shape == (2, 2)
+
+        scales_small, _ = estimate_noise_profile(img, patch_size=4)
+        assert scales_small.shape == (2, 2)
+
+    def test_estimate_noise_center_crop_logic(self):
+        """Verify the function doesn't crash on small images where center crop might be very tiny."""
+        # Minimal image that allows for center cropping and tiling
+        # 32x32 -> center crop 16x16 -> 2x2 planes of 8x8 -> 1 patch of 8x8
+        small_img = np.random.rand(32, 32).astype(np.float32)
+
+        # This will likely hit the fallback because 1 patch < 10 required
+        scales, _ = estimate_noise_profile(small_img, patch_size=8)
+        assert scales.shape == (2, 2)
 
 
 # ---------------------------------------- Aligning Functions ----------------------------------------
