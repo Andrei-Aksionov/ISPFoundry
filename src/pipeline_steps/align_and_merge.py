@@ -68,7 +68,12 @@ def downsample_luma_proxy(proxy: np.ndarray) -> np.ndarray:
         the next coarsest level in the pyramid.
 
     """
+    if proxy.shape == (1, 1):
+        logger.warning("Trying to downsample a 1 pixel image.")
+        return proxy
+
     height, width = proxy.shape
+
     # Ensure even dimensions for 2x2 reshaping
     height, width = height & ~1, width & ~1
     proxy = proxy[:height, :width]
