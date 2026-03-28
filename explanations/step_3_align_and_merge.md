@@ -9,8 +9,6 @@ The process consists of two primary theoretical challenges:
 1. **Alignment**: Calculating the precise movement between frames so that every object in the scene sits at the exact same coordinate across the entire burst.
 2. **Merging**: Combining these aligned pixels while ignoring "outliers" (like a moving car or a walking person) to prevent visual artifacts.
 
----
-
 ## Why Align and Merge?
 
 ### 1. Improving the Signal-to-Noise Ratio (SNR)
@@ -31,8 +29,6 @@ A single exposure often forces a choice: capture detail in the dark shadows (mak
 ### 3. "Lucky" Imaging
 
 In handheld photography, your hand is constantly shaking. In a burst of 10 frames, 1 or 2 will likely be captured during a moment of relative stability. The pipeline identifies this "sharpest" frame and uses it as the **Reference Frame** to which all others are aligned.
-
----
 
 ## Pipeline Order
 
@@ -75,10 +71,6 @@ Pixels are discrete blocks, but light and motion are continuous. An object might
 
 ## Mathematical Details of Align and Merge
 
-This section provides the formal mathematical framework for the burst merging process.
-
----
-
 ### 1. Signal-to-Noise Ratio (SNR) and Dynamic Range
 
 In a digital image, any pixel value $I$ is composed of the true scene signal $S$ and random noise $N$:
@@ -100,8 +92,6 @@ Dynamic Range is the ratio between the brightest signal the sensor can record ($
 $$DR = 20 \log_{10} \left( \frac{S_{max}}{\sigma} \right)$$
 
 **Explanation**: By merging frames, we reduce the noise floor $\sigma$ to $\sigma_{merged}$. Because the denominator becomes smaller, the total range increases. This allows us to "see" further into the dark shadows where the signal was previously buried under grain, effectively widening the gap between the darkest and brightest parts of the image.
-
----
 
 ### 2. Alignment: Integer and Sub-pixel "Flow"
 
@@ -129,8 +119,6 @@ $$f(x, y) = Ax^2 + By^2 + Cxy + Dx + Ey + F$$
 
 By taking the partial derivatives $\frac{\partial f}{\partial x}$ and $\frac{\partial f}{\partial y}$ and setting them to zero, we solve for the exact coordinates $(x, y)$ of the "bottom of the bowl." This gives us the **sub-pixel flow vector**, allowing the pipeline to align frames with a precision of 0.1 pixels or better.
 
----
-
 ### 3. Robust Merging (Ghost Rejection)
 
 To combine frames without creating "ghosts" of moving objects, we use a weighted average. The merged pixel value $I_{merged}$ is:
@@ -148,8 +136,6 @@ $$w = \exp \left( -\frac{D(R, T)}{k \cdot \sigma_{noise}^2} \right)$$
 * **$k$**: A "sensitivity" constant. A larger $k$ makes the algorithm more "forgiving" of motion, while a smaller $k$ is more aggressive at rejecting potential ghosts.
 * **$\exp(-\dots)$**: This creates an exponential drop-off. If an object moved (creating a huge $D$), the weight $w$ drops toward zero almost instantly, excluding that moving object from the final average.
 
----
-
 ## Common Misconceptions
 
 ### "More frames always result in a better image."
@@ -165,8 +151,6 @@ In a single shot, your sensor captures data in discrete 10-bit or 12-bit integer
 ### "Simple averaging is the best way to merge."
 
 **Incorrect.** If you simply average 10 frames and a bird flies through the frame in just one of them, you will end up with a "ghost bird" (a 10% transparent artifact). A sophisticated ISP uses **Robust Weights** to realize that the pixels containing the bird don't match the "consensus" of the other frames. It then excludes those specific pixels from the average, ensuring the final image is clean and artifact-free.
-
----
 
 ## Summary
 
