@@ -74,6 +74,7 @@ Pixels are discrete blocks, but light and motion are continuous. An object might
 ### 1. Signal-to-Noise Ratio (SNR) and Dynamic Range
 
 In a digital image, any pixel value $I$ is composed of the true scene signal $S$ and random noise $N$:
+
 $$I = S + N$$
 
 #### SNR Improvement
@@ -82,6 +83,7 @@ When we average $M$ frames, we assume the signal $S$ is constant (perfectly alig
 
 * **Merged Signal**: The average of $M$ identical signals remains $S$.
 * **Merged Noise**: According to the **Central Limit Theorem**, when adding independent random variables, their variances add. The new noise $\sigma_{merged}$ is:
+
 $$\sigma_{merged} = \frac{1}{N} \sqrt{\sum_{i=1}^{N} \sigma^2} = \frac{\sqrt{N \cdot \sigma^2}}{N} = \frac{\sigma}{\sqrt{N}}$$
 
 **Explanation**: Dividing the single-frame noise by $\sqrt{M}$ significantly cleans the image. For example, merging **9 frames** reduces noise by a factor of **3**.
@@ -89,6 +91,7 @@ $$\sigma_{merged} = \frac{1}{N} \sqrt{\sum_{i=1}^{N} \sigma^2} = \frac{\sqrt{N \
 #### Dynamic Range (DR) Extension
 
 Dynamic Range is the ratio between the brightest signal the sensor can record ($S_{max}$) and the lowest signal distinguishable from noise (the **noise floor**, $\sigma$). It is measured in decibels (dB):
+
 $$DR = 20 \log_{10} \left( \frac{S_{max}}{\sigma} \right)$$
 
 **Explanation**: By merging frames, we reduce the noise floor $\sigma$ to $\sigma_{merged}$. Because the denominator becomes smaller, the total range increases. This allows us to "see" further into the dark shadows where the signal was previously buried under grain, effectively widening the gap between the darkest and brightest parts of the image.
@@ -100,6 +103,7 @@ Alignment is the process of finding a motion vector (or "flow") that maps a targ
 #### Integer Alignment (SAD)
 
 To find the best whole-pixel movement, we calculate the **Sum of Absolute Differences (SAD)** for a given tile. We test various offsets $(\Delta x, \Delta y)$ and look for the minimum value:
+
 $$SAD(\Delta x, \Delta y) = \sum_{i,j \in \text{Tile}} |R(i, j) - T(i + \Delta x, j + \Delta y)|$$
 
 * **$R(i, j)$**: Pixel value in the reference frame.
@@ -109,6 +113,7 @@ $$SAD(\Delta x, \Delta y) = \sum_{i,j \in \text{Tile}} |R(i, j) - T(i + \Delta x
 #### Sub-pixel Refinement (Flow Estimation)
 
 To find motion at a precision smaller than one pixel, we treat the SAD scores of the best integer match and its 8 neighbors as a 3D surface. We fit a **2D Quadratic Function** to these points:
+
 $$f(x, y) = Ax^2 + By^2 + Cxy + Dx + Ey + F$$
 
 **Explanation of the Variables**:
@@ -122,11 +127,13 @@ By taking the partial derivatives $\frac{\partial f}{\partial x}$ and $\frac{\pa
 ### 3. Robust Merging (Ghost Rejection)
 
 To combine frames without creating "ghosts" of moving objects, we use a weighted average. The merged pixel value $I_{merged}$ is:
+
 $$I_{merged} = \frac{\sum_{i=1}^{M} w_i \cdot I_i}{\sum_{i=1}^{M} w_i}$$
 
 #### The Weighting Formula
 
 The weight $w$ for a specific pixel or tile is determined by its similarity to the reference frame, normalized by the expected noise variance $\sigma_{noise}^2$:
+
 $$w = \exp \left( -\frac{D(R, T)}{k \cdot \sigma_{noise}^2} \right)$$
 
 **Explanation of the Formula**:
