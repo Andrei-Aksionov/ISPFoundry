@@ -839,7 +839,7 @@ def merge_tile(
     # 1. Temporal robustness
     # Determines if the tile matches the reference. If SAD is high (ghosting/motion),
     # the weight drops to near zero, effectively ignoring this specific tile.
-    robustness_weight = np.exp(-sad_score / k)
+    robustness_weight = 1.0 if is_reference else np.exp(-sad_score / k)
     if robustness_weight < 1e-4:
         return
 
@@ -856,13 +856,12 @@ def merge_tile(
     lower_bound = saturation_threshold - edge_softness
 
     # 4. Boundary-safe intersection
-    # We calculate the safe overlap between the shifted tile and the image bounds,
-    # leaving a 1-pixel margin for the bilinear interpolation kernel.
-    r_start = int(max(row_start, np.ceil(-row_offset), 0))
-    r_end = int(min(row_start + tile_size, np.floor(height - row_offset - 1), height))
+    # We calculate the safe overlap between the shifted tile and the image bounds.
+    r_start = int(max(row_start, -np.floor(row_offset), 0))
+    r_end = int(min(row_start + tile_size, height - np.ceil(row_offset), height))
 
-    c_start = int(max(col_start, np.ceil(-col_offset), 0))
-    c_end = int(min(col_start + tile_size, np.floor(width - col_offset - 1), width))
+    c_start = int(max(col_start, -np.floor(col_offset), 0))
+    c_end = int(min(col_start + tile_size, width - np.ceil(col_offset), width))
 
     if r_start >= r_end or c_start >= c_end:
         return
