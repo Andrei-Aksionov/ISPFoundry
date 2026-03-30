@@ -1506,6 +1506,61 @@ class TestMergeImages:
         # We allow a small epsilon for clipping effects, but it should be significantly lower.
         assert output_noise < input_noise
 
+    def test_merge_with_motion_reduces_noise(self):
+        """
+        Verifies that merging a noisy burst with motion (shifting) still reduces noise.
+        This tests the pipeline's ability to either align or robustly handle pixel shifts.
+        """
+        # 1. Setup local RNG
+        rng = np.random.default_rng(24)
+
+        # 2. Define ground truth (use a simple pattern so motion is detectable)
+        # A flat field is bad for motion testing; let's add a simple gradient or block
+        base = np.zeros((128, 128), dtype=np.float32)
+        base[32:96, 32:96] = 0.5  # A gray square in the middle
+
+        noise_var = 0.01 * 0.5 + 0.0001
+        noise_sigma = np.sqrt(noise_var)
+
+        # 3. Create noisy burst with motion (shifting each frame by 1 pixel)
+        burst = []
+        for i in range(5):
+            # Shift the base image by 'i' pixels in both x and y
+            shifted_base = np.roll(base, shift=(i, i), axis=(0, 1))
+
+            # Add noise
+            noisy_frame = shifted_base + rng.normal(0, noise_sigma, base.shape)
+            burst.append(np.clip(noisy_frame, 0, 1).astype(np.float32))
+
+        # 4. Metadata (ISO 1600 to keep k_adaptive high enough for merge)
+        metadata = [
+            {
+                "ExposureTime": "1/100",
+                "ISO": 1600,
+                "color_desc": ["R", "G", "G", "B"],
+                "raw_pattern": [[0, 1], [2, 3]],
+                "NoiseProfile": "0.01 0.0001 0.01 0.0001 0.01 0.0001",
+                "CFAPlaneColor": "Red,Green,Blue",
+            }
+        ] * len(burst)
+
+        # 5. Execute Merge
+        merged = merge_images(burst, metadata)
+
+        # 6. Evaluation
+        # Input noise: standard deviation of (Frame - Ground Truth)
+        input_noise = np.mean([np.std(img - base) for img in burst])
+        output_noise = np.std(merged - base)
+
+        # Check for basic validity
+        assert merged.shape == base.shape
+        assert np.isfinite(merged).all()
+
+        # If alignment works, output_noise should be significantly lower than input_noise
+        # If alignment is off but robustness is on, output_noise will be roughly equal to input_noise
+        # (because it defaults to the reference frame).
+        assert output_noise < input_noise
+
     def test_merge_images_no_motion_improves_snr(self):
         """Verifies that merging improves signal-to-noise ratio (SNR) compared to individual noisy frames with bit-perfect determinism."""
 
@@ -1539,6 +1594,60 @@ class TestMergeImages:
         merged = merge_images(burst, metadata)
 
         # 5. Metrics Calculation
+        # Input noise: standard deviation of (Frame - Ground Truth)
+        input_noise = np.mean([np.std(img - base) for img in burst])
+        output_noise = np.std(merged - base)
+
+        # SNR
+        snr_in = 0.5 / (input_noise + 1e-8)
+        snr_out = 0.5 / (output_noise + 1e-8)
+
+        # Assert improvement
+        # With 5 frames, we expect roughly sqrt(5) ≈ 2.2x improvement in a perfect world
+        assert snr_out > snr_in
+
+    def test_merge_with_motion_improves_snr(self):
+        """
+        Verifies that merging a noisy burst with motion (shifting) still reduces noise.
+        This tests the pipeline's ability to either align or robustly handle pixel shifts.
+        """
+        # 1. Setup local RNG
+        rng = np.random.default_rng(24)
+
+        # 2. Define ground truth (use a simple pattern so motion is detectable)
+        # A flat field is bad for motion testing; let's add a simple gradient or block
+        base = np.zeros((128, 128), dtype=np.float32)
+        base[32:96, 32:96] = 0.5  # A gray square in the middle
+
+        noise_var = 0.01 * 0.5 + 0.0001
+        noise_sigma = np.sqrt(noise_var)
+
+        # 3. Create noisy burst with motion (shifting each frame by 1 pixel)
+        burst = []
+        for i in range(5):
+            # Shift the base image by 'i' pixels in both x and y
+            shifted_base = np.roll(base, shift=(i, i), axis=(0, 1))
+
+            # Add noise
+            noisy_frame = shifted_base + rng.normal(0, noise_sigma, base.shape)
+            burst.append(np.clip(noisy_frame, 0, 1).astype(np.float32))
+
+        # 4. Metadata (ISO 1600 to keep k_adaptive high enough for merge)
+        metadata = [
+            {
+                "ExposureTime": "1/100",
+                "ISO": 1600,
+                "color_desc": ["R", "G", "G", "B"],
+                "raw_pattern": [[0, 1], [2, 3]],
+                "NoiseProfile": "0.01 0.0001 0.01 0.0001 0.01 0.0001",
+                "CFAPlaneColor": "Red,Green,Blue",
+            }
+        ] * len(burst)
+
+        # 5. Execute Merge
+        merged = merge_images(burst, metadata)
+
+        # 6. Evaluation
         # Input noise: standard deviation of (Frame - Ground Truth)
         input_noise = np.mean([np.std(img - base) for img in burst])
         output_noise = np.std(merged - base)
