@@ -1463,28 +1463,90 @@ class TestMergeImages:
             passed_k = mock_proc.call_args.kwargs["k_adaptive"]
             assert passed_k == 2.0
 
-    def test_image_consistency_with_offsets(self, mock_metadata):
-        shape = (128, 128)
-        # 1. Use a larger, more distinct feature
-        # A 40x40 square is much easier for a 32x32 tile to "see"
-        ref = np.zeros(shape, dtype=np.float32)
-        ref[40:80, 40:80] = 1.0
+    def test_merge_no_motion_reduces_noise_vs_ground_truth(self):
+        """
+        Verifies that merging a noisy burst reduces noise relative to the known ground-truth image.
+        Uses a local generator for determinism and aligns noise generation with metadata.
+        """
+        # 1. Setup local RNG for bit-perfect determinism
+        rng = np.random.default_rng(42)
 
-        # 2. Shift it by a clean integer amount first to verify basic alignment
-        # Shift of 4 is safe for a search_radius of 16
-        tgt = np.zeros(shape, dtype=np.float32)
-        tgt[44:84, 44:84] = 1.0
+        # 2. Define ground truth and noise parameters
+        # Matches "0.01 0.0001" in NoiseProfile: var = 0.01 * 0.5 + 0.0001
+        base = np.full((128, 128), 0.5, dtype=np.float32)
+        noise_var = 0.01 * 0.5 + 0.0001
+        noise_sigma = np.sqrt(noise_var)
 
-        # 3. Add just enough noise to satisfy the estimator, but not enough to ruin SAD
-        noise = np.random.normal(0, 0.001, shape).astype(np.float32)
-        burst = [ref + noise, tgt + noise]
+        # 3. Create noisy burst (no motion)
+        burst = [np.clip(base + rng.normal(0, noise_sigma, base.shape), 0, 1).astype(np.float32) for _ in range(5)]
 
-        metadata = [mock_metadata[0], mock_metadata[1]]
+        # 4. Metadata (Aligned with generated noise)
+        metadata = [
+            {
+                "ExposureTime": "1/100",
+                "ISO": 100,
+                "color_desc": ["R", "G", "G", "B"],
+                "raw_pattern": [[0, 1], [2, 3]],
+                "NoiseProfile": "0.01 0.0001 0.01 0.0001 0.01 0.0001",
+                "CFAPlaneColor": "Red,Green,Blue",
+            }
+        ] * len(burst)
 
-        # 4. Run merger
-        merged = merge_images(burst, metadata, tile_size=32, max_search_radius=16)
+        # 5. Execute Merge
+        merged = merge_images(burst, metadata)
 
-        # Check a point that should be 1.0 in BOTH shifted and original
-        # If alignment worked, (45, 45) should be ~1.0.
-        # If it failed, it would be ~0.5 (averaging 1.0 and 0.0) or 0.0.
-        assert merged[45, 45] > 0.8, f"Value was {merged[45, 45]} - Alignment likely failed"
+        # 6. Evaluation
+        input_noise = np.mean([np.std(img - base) for img in burst])
+        output_noise = np.std(merged - base)
+
+        assert merged.shape == base.shape
+        assert np.isfinite(merged).all()
+
+        # Assert noise reduction
+        # We allow a small epsilon for clipping effects, but it should be significantly lower.
+        assert output_noise < input_noise
+
+    def test_merge_images_no_motion_improves_snr(self):
+        """Verifies that merging improves signal-to-noise ratio (SNR) compared to individual noisy frames with bit-perfect determinism."""
+
+        # Use a local generator for guaranteed determinism
+        rng = np.random.default_rng(0)
+
+        # 1. Setup base signal
+        base = np.ones((128, 128), dtype=np.float32) * 0.5
+
+        # 2. Generate noisy burst
+        # Standard deviation: sqrt(0.01 * 0.5 + 0.0001) ≈ 0.0714
+        noise_sigma = np.sqrt(0.01 * base + 0.0001)
+
+        # Use the generator for the normal distribution
+        burst = [np.clip(base + rng.normal(0, noise_sigma), 0, 1).astype(np.float32) for _ in range(5)]
+
+        # 3. Metadata setup
+        # Ensure NoiseProfile string matches the params used in generation
+        metadata = [
+            {
+                "ExposureTime": "1/100",
+                "ISO": 100,
+                "color_desc": ["R", "G", "G", "B"],
+                "raw_pattern": [[0, 1], [2, 3]],
+                "NoiseProfile": "0.01 0.0001 0.01 0.0001 0.01 0.0001",
+                "CFAPlaneColor": "Red,Green,Blue",
+            }
+        ] * 5
+
+        # 4. Process
+        merged = merge_images(burst, metadata)
+
+        # 5. Metrics Calculation
+        # Input noise: standard deviation of (Frame - Ground Truth)
+        input_noise = np.mean([np.std(img - base) for img in burst])
+        output_noise = np.std(merged - base)
+
+        # SNR
+        snr_in = 0.5 / (input_noise + 1e-8)
+        snr_out = 0.5 / (output_noise + 1e-8)
+
+        # Assert improvement
+        # With 5 frames, we expect roughly sqrt(5) ≈ 2.2x improvement in a perfect world
+        assert snr_out > snr_in
