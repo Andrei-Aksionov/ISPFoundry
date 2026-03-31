@@ -895,7 +895,7 @@ def merge_tile(
             weights_accumulator[r, c] += combined_weight
 
 
-@njit(parallel=True, fastmath=True)
+@njit(parallel=False, fastmath=True)
 def _parallel_tile_processor(
     # --- INPUT DATA (The Pyramids) ---
     reference_proxy_level_0: np.ndarray,
