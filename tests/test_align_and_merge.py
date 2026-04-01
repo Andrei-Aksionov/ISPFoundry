@@ -1659,3 +1659,136 @@ class TestMergeImages:
         # Assert improvement
         # With 5 frames, we expect roughly sqrt(5) ≈ 2.2x improvement in a perfect world
         assert snr_out > snr_in
+
+    def test_merge_parallel_tile_processor_jit_no_jit_consistency(self):
+        """Verifies that the Numba-accelerated (parallel) version and the pure Python version produce identical results."""
+        # 1. Setup local RNG
+        rng = np.random.default_rng(24)
+
+        # 2. Define ground truth
+        base = np.zeros((128, 128), dtype=np.float32)
+        base[32:96, 32:96] = 0.5  # A gray square
+
+        noise_var = 0.01 * 0.5 + 0.0001
+        noise_sigma = np.sqrt(noise_var)
+
+        # 3. Create noisy burst with motion
+        burst = []
+        for i in range(5):
+            shifted_base = np.roll(base, shift=(i, i), axis=(0, 1))
+            noisy_frame = shifted_base + rng.normal(0, noise_sigma, base.shape)
+            burst.append(np.clip(noisy_frame, 0, 1).astype(np.float32))
+
+        metadata = [
+            {
+                "ExposureTime": "1/100",
+                "ISO": 1600,
+                "color_desc": "RGBG",  # Adjusted for typical metadata structure
+                "raw_pattern": [[0, 1], [3, 2]],
+                "NoiseProfile": "0.01 0.0001 0.01 0.0001 0.01 0.0001",
+                "CFAPlaneColor": "Red,Green,Blue",
+            }
+        ] * len(burst)
+
+        # --- 4. Verify Numba Configuration ---
+        # We check the dispatcher for the parallel tile processor
+        # (assuming it's the core JIT function)
+        from pipeline_steps.align_and_merge import _parallel_tile_processor
+
+        target_parallel = _parallel_tile_processor.targetoptions.get("parallel", False)
+        target_fastmath = _parallel_tile_processor.targetoptions.get("fastmath", False)
+
+        assert target_parallel is True, "Numba parallelism is not enabled!"
+        assert target_fastmath is True, "Numba fastmath is not enabled!"
+
+        # --- 5. Execute and Compare ---
+
+        # a) Execute Parallel Numba variant
+        # This uses the decorated function as defined in your code
+        merged_numba = merge_images(burst, metadata)
+
+        # b) Execute Pure Python variant
+        # We use .py_func to bypass the Numba JIT wrapper entirely
+        # We temporarily swap the JIT function with its Python original
+        import pipeline_steps.align_and_merge
+
+        original_processor = pipeline_steps.align_and_merge._parallel_tile_processor
+        try:
+            pipeline_steps.align_and_merge._parallel_tile_processor = original_processor.py_func
+            merged_python = pipeline_steps.align_and_merge.merge_images(burst, metadata)
+        finally:
+            # Restore the JIT version
+            pipeline_steps.align_and_merge._parallel_tile_processor = original_processor
+
+        # 6. Evaluation
+        # We check for bit-exact identity.
+        # Note: If fastmath is on, we might allow a very small epsilon (1e-7)
+        # due to reordering of floating point additions.
+        np.testing.assert_allclose(
+            merged_numba, merged_python, atol=1e-7, err_msg="Numba parallel and Python results diverged!"
+        )
+
+    def test_merge_parallel_tile_processor_verify_no_racing_condition(self):
+        """
+        Stress tests the parallel implementation to catch race conditions.
+        Runs the same merge multiple times and asserts bit-exact (or epsilon) identity.
+        """
+        # 1. Setup - Use a larger image to increase the window for collisions
+        # 256x256 provides significantly more tiles and overlap points
+        rng = np.random.default_rng(42)
+        shape = (256, 256)
+
+        # Create a base with some structure
+        base = np.zeros(shape, dtype=np.float32)
+        base[64:192, 64:192] = 0.8
+
+        # 2. Create a noisy burst (10 frames to increase accumulation work)
+        burst = []
+        for i in range(10):
+            # Add random sub-pixel shifts to force different alignment offsets
+            shift = rng.uniform(-2, 2, size=2)
+            # Using a simple roll for the test, or a real shift if available
+            frame = np.roll(base, shift=shift.astype(int), axis=(0, 1))
+            noise = rng.normal(0, 0.05, shape)
+            burst.append(np.clip(frame + noise, 0, 1).astype(np.float32))
+
+        metadata = [
+            {
+                "ExposureTime": "1/100",
+                "ISO": 1600,
+                "color_desc": "RGBG",  # Adjusted for typical metadata structure
+                "raw_pattern": [[0, 1], [3, 2]],
+                "NoiseProfile": "0.01 0.0001 0.01 0.0001 0.01 0.0001",
+                "CFAPlaneColor": "Red,Green,Blue",
+            }
+        ] * len(burst)
+
+        # 3. Execution - Run multiple iterations
+        # Race conditions are probabilistic; running 10+ times increases catch rate.
+        results = []
+        iterations = 10
+
+        for i in range(iterations):
+            # We call the actual JIT-decorated function here
+            results.append(merge_images(burst, metadata))
+
+        # 4. Verification
+        # Compare every run against the first run
+        reference = results[0]
+        for i in range(1, iterations):
+            # Use a very tight tolerance.
+            # Even with fastmath, the phased approach should be deterministic
+            # because the order of operations within each phase is consistent.
+            try:
+                np.testing.assert_allclose(
+                    reference,
+                    results[i],
+                    atol=1e-9,
+                    err_msg=f"Race condition detected! Iteration {i} differs from Iteration 0.",
+                )
+            except AssertionError as e:
+                # Calculate how many pixels actually differed to help debugging
+                diff_mask = ~np.isclose(reference, results[i], atol=1e-9)
+                num_diffs = np.sum(diff_mask)
+                print(f"\n[DEBUG] Failure in iteration {i}: {num_diffs} pixels differed.")
+                raise e
