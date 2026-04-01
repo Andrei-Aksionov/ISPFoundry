@@ -895,7 +895,7 @@ def merge_tile(
             weights_accumulator[r, c] += combined_weight
 
 
-@njit(parallel=False, fastmath=True)
+@njit(parallel=True, fastmath=True)
 def _parallel_tile_processor(
     # --- INPUT DATA (The Pyramids) ---
     reference_proxy_level_0: np.ndarray,
@@ -931,45 +931,51 @@ def _parallel_tile_processor(
     robustness and SNR-aware model.
     """
 
-    for idx in prange(len(proxy_rows)):  # ty:ignore[not-iterable]
-        proxy_row = proxy_rows[idx]
-        for proxy_col in proxy_cols:
-            if is_reference:
-                # Images aligned to the reference; to itself it is a perfect match
-                row_offset, col_offset, score = 0, 0, 0
-            else:
-                row_offset, col_offset, score = find_best_offset(
-                    reference_proxy_level_0=reference_proxy_level_0,
-                    reference_proxy_level_1=reference_proxy_level_1,
-                    reference_proxy_level_2=reference_proxy_level_2,
-                    target_proxy_level_0=target_proxy_level_0,
-                    target_proxy_level_1=target_proxy_level_1,
-                    target_proxy_level_2=target_proxy_level_2,
-                    row_start=proxy_row,
-                    col_start=proxy_col,
-                    tile_size=proxy_tile_size,
-                    search_radius=proxy_max_search_radius,
-                    noise_scales=noise_scales,
-                    noise_offsets=noise_offsets,
-                    exposure_scaler=exposure_scaler,
-                )
+    # Process the grid in 4 independent phases to prevent spatial overlap
+    for phase_row in range(2):
+        for phase_col in range(2):
+            # prange only supports step size of 1
+            for i in prange((len(proxy_rows) - phase_row + 1) // 2):  # ty:ignore[not-iterable]
+                proxy_row = proxy_rows[i * 2 + phase_row]
+                for j in range((len(proxy_cols) - phase_col + 1) // 2):
+                    proxy_col = proxy_cols[j * 2 + phase_col]
 
-            # Merging is done on full-res image, thus size_scaler is used
-            merge_tile(
-                merged_accumulator=merged_accumulator,
-                weights_accumulator=weights_accumulator,
-                target_image=target_image,
-                row_start=proxy_row * size_scaler,
-                col_start=proxy_col * size_scaler,
-                row_offset=row_offset * size_scaler,
-                col_offset=col_offset * size_scaler,
-                sad_score=score,
-                tile_size=proxy_tile_size * size_scaler,
-                blending_window=hann_window,
-                exposure_scaler=exposure_scaler,
-                k=k_adaptive,
-                is_reference=is_reference,
-            )
+                    if is_reference:
+                        # Images aligned to the reference; to itself it is a perfect match
+                        row_offset, col_offset, score = 0, 0, 0
+                    else:
+                        row_offset, col_offset, score = find_best_offset(
+                            reference_proxy_level_0=reference_proxy_level_0,
+                            reference_proxy_level_1=reference_proxy_level_1,
+                            reference_proxy_level_2=reference_proxy_level_2,
+                            target_proxy_level_0=target_proxy_level_0,
+                            target_proxy_level_1=target_proxy_level_1,
+                            target_proxy_level_2=target_proxy_level_2,
+                            row_start=proxy_row,
+                            col_start=proxy_col,
+                            tile_size=proxy_tile_size,
+                            search_radius=proxy_max_search_radius,
+                            noise_scales=noise_scales,
+                            noise_offsets=noise_offsets,
+                            exposure_scaler=exposure_scaler,
+                        )
+
+                    # Merging is done on full-res image, thus size_scaler is used
+                    merge_tile(
+                        merged_accumulator=merged_accumulator,
+                        weights_accumulator=weights_accumulator,
+                        target_image=target_image,
+                        row_start=proxy_row * size_scaler,
+                        col_start=proxy_col * size_scaler,
+                        row_offset=row_offset * size_scaler,
+                        col_offset=col_offset * size_scaler,
+                        sad_score=score,
+                        tile_size=proxy_tile_size * size_scaler,
+                        blending_window=hann_window,
+                        exposure_scaler=exposure_scaler,
+                        k=k_adaptive,
+                        is_reference=is_reference,
+                    )
 
 
 @register_step(ISPStep.ALIGN_AND_MERGE)
