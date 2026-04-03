@@ -204,7 +204,7 @@ def plot_images(
     images: np.ndarray | Sequence[np.ndarray],
     titles: str | Sequence[str] | None = None,
     fig_size: tuple[float, float] | None = None,
-    inch_width_pre_image: int | None = None,
+    inch_width_per_image: int | None = None,
     max_per_row: int = 3,
 ) -> None:
     """
@@ -214,7 +214,7 @@ def plot_images(
         images (np.ndarray or Sequence of np.ndarray): List of images to display.
         titles (str, Sequence of str, optional): Titles for each image. Defaults to empty strings.
         fig_size (tuple[float, float], optional): Figure size in inches (width, height). If None, calculated automatically.
-        inch_width_pre_image (int, optional): Width in inches per image. Used if fig_size is not provided.
+        inch_width_per_image (int, optional): Width in inches per image. Used if fig_size is not provided.
         max_per_row (int): Maximum number of images per row to be displayed.
 
     """
@@ -231,7 +231,7 @@ def plot_images(
 
     best_nrow, best_ncol = find_best_layout(len(images), max_per_row)
     if fig_size is None:
-        fig_size = find_best_figsize(images, best_nrow, best_ncol, inch_width_pre_image)
+        fig_size = find_best_figsize(images, best_nrow, best_ncol, inch_width_per_image)
 
     _, axes = plt.subplots(best_nrow, best_ncol, figsize=fig_size)
     axes = iter(axes.flatten()) if isinstance(axes, np.ndarray) else iter([axes])
@@ -239,7 +239,10 @@ def plot_images(
     for img, title in zip(images, titles):
         ax = next(axes)
         ax.set_title(title)
-        ax.imshow(img, cmap="gray" if img.ndim == 2 else None)
+        vmin = vmax = None
+        if img.min() <= 0.0 and img.max() <= 1.0:
+            vmin, vmax = 0, 1
+        ax.imshow(img, cmap="gray" if img.ndim == 2 else None, vmin=vmin, vmax=vmax)
         ax.axis("off")
 
     # exhaust remaining axes
