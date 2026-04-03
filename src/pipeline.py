@@ -35,6 +35,7 @@ class ISPPipeline:
             importlib.import_module(f"pipeline_steps.{module_name}")
             logger.info(f"Loaded: {module_name}")
 
+    # TODO (andrei aksionau): input and output need to be numpy array (3D), not a list
     def run(
         self,
         raw_imgs: Sequence[np.ndarray],
