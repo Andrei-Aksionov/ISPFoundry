@@ -115,6 +115,7 @@ def get_exposure_scalers(metadata: list[dict[str, Any]]) -> np.ndarray:
         return float(value)
 
     # Find the shortest exposure
+    # TODO (andrei aksionau): this assumes that ISO is identical for all frames, which is not always true
     exposures = np.array([parse_expr(mtd["ExposureTime"]) for mtd in metadata], dtype=np.float32)
     ref_exposure = exposures.min()
 
@@ -740,7 +741,8 @@ def sample_raw_bilinear(
     # 1. Fast Path: If the offset is exactly a multiple of 2, we are aligned
     # perfectly with a Bayer pixel of the same color. We skip math to avoid blur.
     r_off_int, c_off_int = round(row_offset), round(col_offset)
-    is_integer_shift = abs(row_offset - r_off_int) < 1e-5 and abs(col_offset - c_off_int) < 1e-5
+    # Optimization: no need for sampling if the shift is so small
+    is_integer_shift = abs(row_offset - r_off_int) < 0.05 and abs(col_offset - c_off_int) < 0.05
 
     if is_integer_shift and (r_off_int % 2 == 0) and (c_off_int % 2 == 0):
         # Direct access to the same-color pixel
