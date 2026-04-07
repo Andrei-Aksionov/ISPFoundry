@@ -82,32 +82,35 @@ def downsample_luma_proxy(proxy: np.ndarray) -> np.ndarray:
     return proxy.reshape(height // 2, 2, width // 2, 2).mean(axis=(1, 3))
 
 
-def get_exposure_scalers(metadata: list[dict[str, Any]]) -> np.ndarray:
+def get_photometric_scalers(metadata: list[dict[str, Any]]) -> np.ndarray:
     """
-    Calculates normalization factors for a burst of images with varying exposure times.
+    Calculates normalization factors based on total photometric exposure (Time * ISO).
 
-    This function identifies the shortest exposure in the burst and calculates a
-    scaler for every frame. These scalers are used to linearize the brightness
-    across the burst and to determine the SNR-based weight during merging.
+    This function identifies the frame with the lowest total exposure (shortest
+    shutter speed and/or lowest ISO) and calculates a scaler for every frame.
+    These scalers are used to linearize the signal levels across the burst,
+    enabling a consistent merge and providing a basis for SNR-aware weighting.
 
     Args:
         metadata (list[dict[str, Any]]): A list of metadata dictionaries for each
-            frame in the burst. Each dictionary must contain the key "ExposureTime",
-            which can be a float, an integer, or a fractional string (e.g., "1/100").
+            frame in the burst. Each dictionary must contain:
+            - "ExposureTime": float, int, or fractional string (e.g., "1/100").
+            - "ISO": numeric gain value.
 
     Returns:
         np.ndarray: A 1D float32 array of scalers, one for each frame.
-            The scaler for the shortest exposure(s) will be 1.0. Frames with
-            longer exposures will have scalers < 1.0 (e.g., a 4x longer exposure
-            results in a 0.25 scaler).
+            The scaler for the frame(s) with the least total exposure will be 1.0.
+            Frames with more gathered light (longer exposure or higher ISO) will
+            have scalers < 1.0 to normalize them down to the reference level.
 
     Note:
-        Multiplying a long-exposure RAW value by its scaler effectively 'underexposes'
-        it to match the reference short exposure, allowing for an apples-to-apples
-        comparison and merge.
+        Multiplying a 'bright' RAW value by its scaler effectively normalizes its
+        digital gain to match the reference frame, allowing for an apples-to-apples
+        comparison during alignment and merging.
 
     """
 
+    # TODO (andrei aksionau): Upcoming Metadata class should do this parsing
     def parse_expr(value: str) -> float:
         if isinstance(value, str) and "/" in value:
             numerator, denominator = value.split("/")
@@ -115,8 +118,7 @@ def get_exposure_scalers(metadata: list[dict[str, Any]]) -> np.ndarray:
         return float(value)
 
     # Find the shortest exposure
-    # TODO (andrei aksionau): this assumes that ISO is identical for all frames, which is not always true
-    exposures = np.array([parse_expr(mtd["ExposureTime"]) for mtd in metadata], dtype=np.float32)
+    exposures = np.array([parse_expr(mtd["ExposureTime"]) * mtd.get("ISO", 100) for mtd in metadata], dtype=np.float32)
     ref_exposure = exposures.min()
 
     # Normalize other exposures
@@ -128,7 +130,7 @@ def find_sharpest_image_idx(images: list[np.ndarray], metadata: list[dict[str, A
     """
     Selects the optimal reference frame from the burst using a 'Lucky Imaging' approach.
 
-    The selection is restricted to short-exposure frames to ensure the alignment base
+    The selection is restricted to short-exposure frames with low ISO to ensure the alignment base
     is free from motion blur. Sharpness is estimated using the variance of the
     Laplacian on a smoothed luma proxy (essentially a Laplacian of Gaussian operator).
 
@@ -145,9 +147,9 @@ def find_sharpest_image_idx(images: list[np.ndarray], metadata: list[dict[str, A
 
     """
 
-    # Identify frames with the shortest exposure (scale factor of 1.0)
-    # Ignore long-exposures as they are prone to motion blur.
-    exposure_scalers = get_exposure_scalers(metadata)
+    # Identify frames with the smallest photometric value (exposure time x ISO)
+    # Ignore long-exposures as they are prone to motion blur; high ISO contains more noise
+    exposure_scalers = get_photometric_scalers(metadata)
     short_exposure_indices = np.where(np.isclose(exposure_scalers, 1.0))[0]
 
     if len(short_exposure_indices) == 0:
@@ -1031,7 +1033,7 @@ def merge_images(
         raise ValueError(f"max_search_radius should be multiple of 8, but got {max_search_radius}")
 
     # 1. Find the image with the highest sharpness
-    exposure_scalers = get_exposure_scalers(metadata)
+    photometric_scalers = get_photometric_scalers(metadata)
     sharpest_image_idx = find_sharpest_image_idx(burst_images, metadata)
     # The sharpest image will be our reference, other images will be merged into it
     reference_image = burst_images[sharpest_image_idx]
@@ -1098,7 +1100,9 @@ def merge_images(
             target_proxy_level_2 = np.zeros((1, 1), dtype=np.float32)
         else:
             # Build target pyramid (with brightness normalization)
-            target_proxy_level_0 = get_luma_proxy(burst_images[img_idx], metadata[img_idx]) * exposure_scalers[img_idx]
+            target_proxy_level_0 = (
+                get_luma_proxy(burst_images[img_idx], metadata[img_idx]) * photometric_scalers[img_idx]
+            )
             target_proxy_level_1 = downsample_luma_proxy(target_proxy_level_0)
             target_proxy_level_2 = downsample_luma_proxy(target_proxy_level_1)
 
@@ -1120,7 +1124,7 @@ def merge_images(
             # --- PHYSICAL / NOISE PARAMETERS ---
             noise_scales=noise_scales,
             noise_offsets=noise_offsets,
-            exposure_scaler=exposure_scalers[img_idx],
+            exposure_scaler=photometric_scalers[img_idx],
             k_adaptive=k_adaptive,
             # --- EXECUTION STATE ---
             target_image=burst_images[img_idx],
