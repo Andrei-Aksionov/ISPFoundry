@@ -13,10 +13,10 @@ from pipeline_steps.align_and_merge import (
     find_best_offset,
     find_sharpest_image_idx,
     find_subpixel_shift,
-    get_exposure_scalers,
     get_hann_window_2d,
     get_luma_proxy,
     get_noise_profile,
+    get_photometric_scalers,
     merge_images,
     merge_tile,
     sample_raw_bilinear,
@@ -174,6 +174,7 @@ class TestDownsampleLumaProxy:
 
 
 class TestGetExposureScalers:
+    # TODO (andrei aksionau): add a test with different ISOs
     def test_scalers_math_simple(self):
         """Verify that a 4x longer exposure results in a 0.25 scaler."""
         metadata = [
@@ -183,7 +184,7 @@ class TestGetExposureScalers:
         ]
 
         expected = np.array([1.0, 0.25, 0.5], dtype=np.float32)
-        result = get_exposure_scalers(metadata)
+        result = get_photometric_scalers(metadata)
 
         np.testing.assert_allclose(result, expected, rtol=1e-6, atol=1e-6)
 
@@ -197,7 +198,7 @@ class TestGetExposureScalers:
 
         # Calculation -> (1/400) / (1/100) = 0.25
         expected = np.array([0.25, 0.125, 1.0], dtype=np.float32)
-        result = get_exposure_scalers(metadata)
+        result = get_photometric_scalers(metadata)
 
         np.testing.assert_allclose(result, expected, rtol=1e-6, atol=1e-6)
 
@@ -210,14 +211,43 @@ class TestGetExposureScalers:
         ]
 
         expected = np.array([0.5, 1.0, 0.25], dtype=np.float32)
-        result = get_exposure_scalers(metadata)
+        result = get_photometric_scalers(metadata)
+
+        np.testing.assert_allclose(result, expected, rtol=1e-6, atol=1e-6)
+
+    def test_different_exposures_and_same_iso(self):
+        metadata = [
+            {"ExposureTime": "1/100", "ISO": 100},
+            {"ExposureTime": "1/50", "ISO": 100},
+            {"ExposureTime": "1/400", "ISO": 100},
+        ]
+
+        expected = np.array([0.25, 0.125, 1.0], dtype=np.float32)
+        result = get_photometric_scalers(metadata)
+
+        np.testing.assert_allclose(result, expected, rtol=1e-6, atol=1e-6)
+
+    def test_different_exposures_and_different_iso(self):
+        metadata = [
+            # These 3 should have the same brightness
+            {"ExposureTime": "1/50", "ISO": 100},  # 8x brighter
+            {"ExposureTime": "1/100", "ISO": 200},  # 8x brighter
+            {"ExposureTime": "1/400", "ISO": 800},  # 8x brighter
+            # These 3 should have different brightness
+            {"ExposureTime": "1/50", "ISO": 400},  # 32x brighter
+            {"ExposureTime": "1/100", "ISO": 100},  # 4x brighter
+            {"ExposureTime": "1/400", "ISO": 100},  # 1x
+        ]
+
+        expected = np.array([0.125, 0.125, 0.125, 0.03125, 0.25, 1.0], dtype=np.float32)
+        result = get_photometric_scalers(metadata)
 
         np.testing.assert_allclose(result, expected, rtol=1e-6, atol=1e-6)
 
     def test_identical_exposures_uniformity(self):
         """All scalers must be 1.0 when exposure times are identical."""
         metadata = [{"ExposureTime": 0.0333}] * 3
-        result = get_exposure_scalers(metadata)
+        result = get_photometric_scalers(metadata)
 
         expected = np.ones(3, dtype=np.float32)
         np.testing.assert_allclose(result, expected, rtol=1e-6, atol=1e-6)
@@ -225,7 +255,7 @@ class TestGetExposureScalers:
     def test_output_metadata_consistency(self):
         """Verify output array properties: length, type, and min value."""
         metadata = [{"ExposureTime": 0.1}, {"ExposureTime": 0.5}, {"ExposureTime": 0.2}]
-        result = get_exposure_scalers(metadata)
+        result = get_photometric_scalers(metadata)
 
         assert result.dtype == np.float32
         assert result.shape == (3,)
@@ -235,7 +265,7 @@ class TestGetExposureScalers:
         """Ensure the function raises a ValueError for un-parsable ExposureTime."""
         metadata = [{"ExposureTime": "not_a_number"}]
         with pytest.raises(ValueError, match="convert string to float"):
-            get_exposure_scalers(metadata)
+            get_photometric_scalers(metadata)
 
 
 class TestFindSharpestImageIdx:
@@ -1402,7 +1432,7 @@ class TestMergeImages:
             patch("pipeline_steps.align_and_merge._parallel_tile_processor") as mock_proc,
             patch("pipeline_steps.align_and_merge.get_luma_proxy", return_value=np.zeros((32, 32))),
             patch("pipeline_steps.align_and_merge.get_noise_profile", return_value=(np.zeros(1), np.zeros(1))),
-            patch("pipeline_steps.align_and_merge.get_exposure_scalers", return_value=[1.0, 1.0]),
+            patch("pipeline_steps.align_and_merge.get_photometric_scalers", return_value=[1.0, 1.0]),
             patch("pipeline_steps.align_and_merge.get_hann_window_2d", return_value=np.ones((32, 32))),
         ):
             # No .py_func needed if merge_images isn't @njit
