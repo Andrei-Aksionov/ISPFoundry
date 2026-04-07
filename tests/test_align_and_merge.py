@@ -215,6 +215,35 @@ class TestGetExposureScalers:
 
         np.testing.assert_allclose(result, expected, rtol=1e-6, atol=1e-6)
 
+    def test_different_exposures_and_same_iso(self):
+        metadata = [
+            {"ExposureTime": "1/100", "ISO": 100},
+            {"ExposureTime": "1/50", "ISO": 100},
+            {"ExposureTime": "1/400", "ISO": 100},
+        ]
+
+        expected = np.array([0.25, 0.125, 1.0], dtype=np.float32)
+        result = get_photometric_scalers(metadata)
+
+        np.testing.assert_allclose(result, expected, rtol=1e-6, atol=1e-6)
+
+    def test_different_exposures_and_different_iso(self):
+        metadata = [
+            # These 3 should have the same brightness
+            {"ExposureTime": "1/50", "ISO": 100},  # 8x brighter
+            {"ExposureTime": "1/100", "ISO": 200},  # 8x brighter
+            {"ExposureTime": "1/400", "ISO": 800},  # 8x brighter
+            # These 3 should have different brightness
+            {"ExposureTime": "1/50", "ISO": 400},  # 32x brighter
+            {"ExposureTime": "1/100", "ISO": 100},  # 4x brighter
+            {"ExposureTime": "1/400", "ISO": 100},  # 1x
+        ]
+
+        expected = np.array([0.125, 0.125, 0.125, 0.03125, 0.25, 1.0], dtype=np.float32)
+        result = get_photometric_scalers(metadata)
+
+        np.testing.assert_allclose(result, expected, rtol=1e-6, atol=1e-6)
+
     def test_identical_exposures_uniformity(self):
         """All scalers must be 1.0 when exposure times are identical."""
         metadata = [{"ExposureTime": 0.0333}] * 3
