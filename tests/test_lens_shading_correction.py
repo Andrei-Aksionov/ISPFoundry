@@ -12,7 +12,19 @@ from pipeline_steps.lens_shading_correction import (
 @pytest.fixture
 def sample_images():
     """Fixture for a sample list of images."""
-    return [np.array([[100, 110], [120, 130]], dtype=np.float32), np.array([[140, 150], [160, 170]], dtype=np.float32)]
+    return np.array(
+        [
+            [
+                [100, 110],
+                [120, 130],
+            ],
+            [
+                [140, 150],
+                [160, 170],
+            ],
+        ],
+        dtype=np.float32,
+    )
 
 
 @pytest.fixture

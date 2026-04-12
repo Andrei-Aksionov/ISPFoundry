@@ -102,7 +102,7 @@ def apply_single_image(img: np.ndarray, lsc_map: np.ndarray, inplace: bool = Fal
 
 @register_step(ISPStep.LENS_SHADING_CORRECTION)
 def apply_lens_shading_correction(
-    imgs: np.ndarray,
+    input_images: np.ndarray,
     metadata: list[dict],
     lsc_maps: list[np.ndarray],
     inplace: bool = False,
@@ -111,7 +111,7 @@ def apply_lens_shading_correction(
     Applies lens shading correction to a burst of images.
 
     Args:
-        imgs: 3D Numpy array of shape (N, H, W) containing input images.
+        input_images: 3D Numpy array of shape (N, H, W) containing input images.
         metadata: List of metadata dictionaries for each image, containing color description and raw pattern information.
         lsc_maps: List of lens shading maps corresponding to the images.
         inplace: If True, modifies the input images in place; otherwise, creates copies and returns them.
@@ -135,13 +135,11 @@ def apply_lens_shading_correction(
     lsc_maps = [interpolate(lsc_map, mt) for lsc_map, mt in zip(lsc_maps, metadata)]
 
     # 4. Applies to the burst
-    if len(lsc_maps) == 1 and len(lsc_maps) != len(imgs):
-        lsc_maps = lsc_maps * len(imgs)
+    if len(lsc_maps) == 1 and len(lsc_maps) != len(input_images):
+        lsc_maps = lsc_maps * len(input_images)
 
-    result_imgs = []
-    for img, lsc_map in zip(imgs, lsc_maps):
-        img = img if inplace else img.copy()
-        img = apply_single_image(img, lsc_map, inplace=True)
-        result_imgs.append(img)
+    processed_images = input_images if inplace else input_images.copy()
+    for image, lsc_map in zip(processed_images, lsc_maps):
+        apply_single_image(image, lsc_map, inplace=True)
 
-    return np.array(result_imgs, dtype=np.float32)
+    return processed_images
