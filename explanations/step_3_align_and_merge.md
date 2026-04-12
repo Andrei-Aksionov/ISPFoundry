@@ -163,7 +163,7 @@ In a single shot, your sensor captures data in discrete 10-bit or 12-bit integer
 
 Align and Merge is the "brain" of the ISP. It:
 
-* Reduces **Signal-to-Noise Ratio (SNR)** by a factor of $\sqrt{N}$.
+* Increases **Signal-to-Noise Ratio (SNR)** by a factor of $\sqrt{N}$.
 * Uses **Tile-Based Hierarchical Search** to handle complex, non-rigid motion quickly.
 * Employs **Sub-pixel Refinement** to maintain sharpness.
 * Acts as a "software-defined sensor" to overcome the physical limits of small lenses.

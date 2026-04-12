@@ -23,10 +23,10 @@ class MockStep:
 class TestISPPipeline(unittest.TestCase):
     def setUp(self):
         """Setup common data and path for all tests."""
-        self.image_input = [
+        self.image_input = np.array([
             np.array([1] * 4, dtype=np.float32),
             np.array([2] * 4, dtype=np.float32),
-        ]
+        ])
         self.metadata = [{"id": 101}, {"id": 102}]
         self.test_dir = Path(tempfile.mkdtemp())
 
@@ -139,5 +139,5 @@ class TestISPPipeline(unittest.TestCase):
             patch("pipeline.pkgutil.iter_modules", return_value=[]),
         ):
             pipeline = ISPPipeline()
-            results = pipeline.run([], [])
-            assert results == []
+            results = pipeline.run(np.array([], dtype=np.float32), [])
+            assert results.size == 0
