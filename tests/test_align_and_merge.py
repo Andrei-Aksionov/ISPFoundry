@@ -284,7 +284,7 @@ class TestFindSharpestImageIdx:
 
         blurry = gaussian_filter(sharp.astype(float), sigma=4.0).astype(np.uint16)
 
-        images = [blurry, sharp]
+        images = np.stack([blurry, sharp])
         # Both are "short" exposures
         metadata = [base_metadata.copy() for _ in range(2)]
 
@@ -311,7 +311,7 @@ class TestFindSharpestImageIdx:
 
         # Even though index 0 (long) is mathematically "sharper" (higher variance),
         # index 1 (short) MUST be selected to avoid clipped highlights.
-        images = [long_exp_img, short_exp_img]
+        images = np.stack([long_exp_img, short_exp_img])
         metadata = [long_metadata, short_metadata]
 
         best_idx = find_sharpest_image_idx(images, metadata)
@@ -326,7 +326,7 @@ class TestFindSharpestImageIdx:
         structural = np.zeros((32, 32), dtype=np.float32)
         structural[:16, :] = 0.8
 
-        images = [noisy, structural]
+        images = np.stack([noisy, structural])
         metadata = [base_metadata.copy() for _ in range(2)]
 
         best_idx = find_sharpest_image_idx(images, metadata)
@@ -342,7 +342,7 @@ class TestFindSharpestImageIdx:
         m2 = base_metadata.copy()
         m2["ExposureTime"] = 0.002  # Equivalent to 1/500
 
-        images = [img, img]
+        images = np.stack([img, img])
         metadata = [m1, m2]
 
         # Both are considered "short" (minimum), should default to first index if identical
@@ -353,7 +353,7 @@ class TestFindSharpestImageIdx:
         """Ensure the function returns a valid index from the whole burst even if exposure_scalers logic fails or metadata is uniform."""
         # Create two identical images
         img = np.random.rand(32, 32).astype(np.float32)
-        images = [img, img]
+        images = np.stack([img, img])
 
         # Metadata with same exposure (all will be 'short' by definition, but we test the logic's ability to handle the list)
         metadata = [base_metadata.copy() for _ in range(2)]
@@ -372,7 +372,7 @@ class TestFindSharpestImageIdx:
         # Create a blurry edge
         blurry_img = gaussian_filter(sharp_img, sigma=2.0)
 
-        images = [blurry_img, sharp_img]
+        images = np.stack([blurry_img, sharp_img])
         metadata = [base_metadata.copy() for _ in range(2)]
 
         best_idx = find_sharpest_image_idx(images, metadata)
@@ -383,7 +383,7 @@ class TestFindSharpestImageIdx:
     def test_all_black_images(self, base_metadata):
         """Edge case: If images are completely black (underexposed), the function should still return an index rather than crashing."""
         black_img = np.zeros((32, 32), dtype=np.float32)
-        images = [black_img, black_img]
+        images = np.stack([black_img, black_img])
         metadata = [base_metadata.copy() for _ in range(2)]
 
         # Should not raise ZeroDivisionError or similar
@@ -393,7 +393,7 @@ class TestFindSharpestImageIdx:
     def test_single_image_burst(self, base_metadata):
         """Verify behavior with a burst of size 1."""
         img = np.random.rand(32, 32).astype(np.float32)
-        images = [img]
+        images = img[None, ...]
         metadata = [base_metadata]
 
         best_idx = find_sharpest_image_idx(images, metadata)
@@ -1411,11 +1411,6 @@ class TestMergeImages:
         # Test: Only one image
         with pytest.raises(ValueError, match="At least two images"):
             merge_images(mock_burst[:1], mock_metadata[:1])
-
-        # Test: Inconsistent shapes
-        bad_burst = [np.zeros((64, 64)), np.zeros((32, 32))]
-        with pytest.raises(ValueError, match="same shape"):
-            merge_images(bad_burst, mock_metadata)
 
         # Test: Bad search radius
         with pytest.raises(ValueError, match="multiple of 8"):

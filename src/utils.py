@@ -173,7 +173,7 @@ def find_best_layout(n: int, max_per_row: int = 3) -> tuple[int, int]:
 
 
 def find_best_figsize(
-    images: Sequence[np.ndarray],
+    image: np.ndarray,
     nrow: int,
     ncol: int,
     inch_width_pre_image: int | None = None,
@@ -182,7 +182,7 @@ def find_best_figsize(
     Calculate the best figure size for displaying a grid of images.
 
     Args:
-        images (Sequence of np.ndarray): List of images to be displayed.
+        image (np.ndarray): An example of an image to be displayed.
         nrow (int): Number of rows in the grid.
         ncol (int): Number of columns in the grid.
         inch_width_pre_image (int, optional): Width in inches per image. Defaults to 6 if not provided.
@@ -192,7 +192,7 @@ def find_best_figsize(
 
     """
 
-    img_h, img_w = images[0].shape[:2]
+    img_h, img_w = image.shape[:2]
     aspect_ratio = img_h / img_w
     base_width = inch_width_pre_image or 6  # base width per image in inches
     fig_width = base_width * ncol
@@ -231,7 +231,7 @@ def plot_images(
 
     best_nrow, best_ncol = find_best_layout(len(images), max_per_row)
     if fig_size is None:
-        fig_size = find_best_figsize(images, best_nrow, best_ncol, inch_width_per_image)
+        fig_size = find_best_figsize(images[0], best_nrow, best_ncol, inch_width_per_image)
 
     _, axes = plt.subplots(best_nrow, best_ncol, figsize=fig_size)
     axes = iter(axes.flatten()) if isinstance(axes, np.ndarray) else iter([axes])

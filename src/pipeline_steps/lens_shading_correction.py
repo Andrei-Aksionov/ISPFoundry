@@ -12,11 +12,11 @@ def align_cfa_pattern(lsc_maps: list[np.ndarray], metadata: list[dict]) -> list[
     Aligns the CFA pattern of lens shading maps to match that of the images.
 
     Args:
-        lsc_maps (list[np.ndarray]): List of lens shading maps.
-        metadata (list[dict]): List of metadata dictionaries containing color description and raw pattern information.
+        lsc_maps: List of lens shading maps.
+        metadata: List of metadata dictionaries containing color description and raw pattern information.
 
     Returns:
-        list[np.ndarray]: List of lens shading maps with aligned CFA patterns.
+        list: List of lens shading maps with aligned CFA patterns.
 
     Raises:
         ValueError: If the color description or raw pattern is missing in any metadata.
@@ -47,8 +47,8 @@ def interpolate(lsc_map: np.ndarray, metadata: dict) -> np.ndarray:
     Interpolates the lens shading map to match the dimensions of the original image.
 
     Args:
-        lsc_map (np.ndarray): Lens shading map.
-        metadata (dict): Metadata dictionary containing width and height information.
+        lsc_map: Lens shading map.
+        metadata: Metadata dictionary containing width and height information.
 
     Returns:
         np.ndarray: Interpolated lens shading map.
@@ -83,9 +83,9 @@ def apply_single_image(img: np.ndarray, lsc_map: np.ndarray, inplace: bool = Fal
     Applies the lens shading map to a single image.
 
     Args:
-        img (np.ndarray): Input image.
-        lsc_map (np.ndarray): Lens shading map.
-        inplace (bool): If True, modifies the input image in place; otherwise, creates a copy and returns it.
+        img: Input image.
+        lsc_map: Lens shading map.
+        inplace: If True, modifies the input image in place; otherwise, creates a copy and returns it.
 
     Returns:
         np.ndarray: Corrected image with lens shading applied.
@@ -102,22 +102,22 @@ def apply_single_image(img: np.ndarray, lsc_map: np.ndarray, inplace: bool = Fal
 
 @register_step(ISPStep.LENS_SHADING_CORRECTION)
 def apply_lens_shading_correction(
-    imgs: list[np.ndarray],
+    input_images: np.ndarray,
     metadata: list[dict],
     lsc_maps: list[np.ndarray],
     inplace: bool = False,
-) -> list[np.ndarray]:
+) -> np.ndarray:
     """
     Applies lens shading correction to a burst of images.
 
     Args:
-        imgs (list[np.ndarray]): List of input images.
-        metadata (list[dict]): List of metadata dictionaries for each image, containing color description and raw pattern information.
-        lsc_maps (list[np.ndarray]): List of lens shading maps corresponding to the images.
-        inplace (bool): If True, modifies the input images in place; otherwise, creates copies and returns them.
+        input_images: 3D Numpy array of shape (N, H, W) containing input images.
+        metadata: List of metadata dictionaries for each image, containing color description and raw pattern information.
+        lsc_maps: List of lens shading maps corresponding to the images.
+        inplace: If True, modifies the input images in place; otherwise, creates copies and returns them.
 
     Returns:
-        list[np.ndarray]: List of corrected images with lens shading applied.
+        A numpy array of shape (N, H, W) that contains corrected images with lens shading applied.
 
     """
 
@@ -135,13 +135,11 @@ def apply_lens_shading_correction(
     lsc_maps = [interpolate(lsc_map, mt) for lsc_map, mt in zip(lsc_maps, metadata)]
 
     # 4. Applies to the burst
-    if len(lsc_maps) == 1 and len(lsc_maps) != len(imgs):
-        lsc_maps = lsc_maps * len(imgs)
+    if len(lsc_maps) == 1 and len(lsc_maps) != len(input_images):
+        lsc_maps = lsc_maps * len(input_images)
 
-    result_imgs = []
-    for img, lsc_map in zip(imgs, lsc_maps):
-        img = img if inplace else img.copy()
-        img = apply_single_image(img, lsc_map, inplace=True)
-        result_imgs.append(img)
+    processed_images = input_images if inplace else input_images.copy()
+    for image, lsc_map in zip(processed_images, lsc_maps):
+        apply_single_image(image, lsc_map, inplace=True)
 
-    return result_imgs
+    return processed_images

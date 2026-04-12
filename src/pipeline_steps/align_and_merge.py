@@ -28,7 +28,7 @@ def get_luma_proxy(raw_image: np.ndarray, metadata: dict[str, Any]) -> np.ndarra
             - 'raw_pattern': 2x2 list/array mapping CFA indices to the physical pixel grid
 
     Returns:
-        np.ndarray: Grayscale luma proxy of shape (H//2, W//2) as float32.
+        Grayscale luma proxy of shape (H//2, W//2) as float32.
             Dimensions are truncated to the nearest even multiple before processing.
 
     """
@@ -92,13 +92,13 @@ def get_photometric_scalers(metadata: list[dict[str, Any]]) -> np.ndarray:
     enabling a consistent merge and providing a basis for SNR-aware weighting.
 
     Args:
-        metadata (list[dict[str, Any]]): A list of metadata dictionaries for each
+        metadata: A list of metadata dictionaries for each
             frame in the burst. Each dictionary must contain:
             - "ExposureTime": float, int, or fractional string (e.g., "1/100").
             - "ISO": numeric gain value.
 
     Returns:
-        np.ndarray: A 1D float32 array of scalers, one for each frame.
+        A 1D float32 array of scalers, one for each frame.
             The scaler for the frame(s) with the least total exposure will be 1.0.
             Frames with more gathered light (longer exposure or higher ISO) will
             have scalers < 1.0 to normalize them down to the reference level.
@@ -126,7 +126,7 @@ def get_photometric_scalers(metadata: list[dict[str, Any]]) -> np.ndarray:
     return (ref_exposure / exposures).astype(np.float32)
 
 
-def find_sharpest_image_idx(images: list[np.ndarray], metadata: list[dict[str, Any]]) -> int:
+def find_sharpest_image_idx(images: np.ndarray, metadata: list[dict[str, Any]]) -> int:
     """
     Selects the optimal reference frame from the burst using a 'Lucky Imaging' approach.
 
@@ -139,11 +139,11 @@ def find_sharpest_image_idx(images: list[np.ndarray], metadata: list[dict[str, A
     A higher variance correlates with steeper edge gradients and less defocus or motion blur.
 
     Args:
-        images: List of Bayer RAW images in [0, 1] range.
+        images: (N, H, W) 3D ndarray of Bayer RAW images in [0, 1] range.
         metadata: List of metadata dicts containing 'ExposureTime' and CFA info.
 
     Returns:
-        int: Index of the sharpest short-exposure frame.
+        Index of the sharpest short-exposure frame.
 
     """
 
@@ -198,7 +198,7 @@ def get_noise_profile(image: np.ndarray, metadata: dict[str, Any]) -> tuple[np.n
         metadata: A dictionary containing per-frame sensor information (e.g., exposure time, black level).
 
     Returns:
-        tuple[np.ndarray, np.ndarray]:
+        Tuple containing:
             - scales_grid: A 2x2 float32 array of shot noise scales.
             - offsets_grid: A 2x2 float32 array of read noise offsets.
 
@@ -252,7 +252,7 @@ def estimate_noise_profile(image: np.ndarray, patch_size: int = 8) -> tuple[np.n
         patch_size: Size of tiles used for local statistics (applied to sub-sampled channels).
 
     Returns:
-        tuple[np.ndarray, np.ndarray]: 2x2 grids of (slope/shot) and (intercept/read) noise.
+        2x2 grids of (slope/shot) and (intercept/read) noise.
 
     """
 
@@ -393,8 +393,8 @@ def compute_tile_sad(
             in SAD calculation
 
     Returns:
-        float or None: The normalized SAD score. A value of ~1.0 indicates differences
-               consistent with the expected noise floor. None if offsets are out of bounds.
+        The normalized SAD score. A value of ~1.0 indicates differences
+            consistent with the expected noise floor. None if offsets are out of bounds.
 
     """
 
@@ -458,7 +458,7 @@ def find_best_integer_offset(
         inv_sigma: Pre-calculated inverse noise standard deviation for normalization.
 
     Returns:
-        tuple: (best_dy, best_dx, minimum_sad_score)
+        (best_dy, best_dx, minimum_sad_score)
 
     """
 
@@ -513,7 +513,7 @@ def find_best_float_offset(
         inv_sigma: Noise-normalization factor (1 / noise_std).
 
     Returns:
-        tuple: (refined_dy, refined_dx, normalized_sad_score)
+        (refined_dy, refined_dx, normalized_sad_score)
 
     """
 
@@ -596,7 +596,7 @@ def find_best_offset(
         exposure_scaler: Ratio of reference exposure to target exposure.
 
     Returns:
-        tuple: (final_dy, final_dx, min_sad_score)
+        (final_dy, final_dx, min_sad_score)
 
     """
 
@@ -734,7 +734,7 @@ def sample_raw_bilinear(
         col_offset: The horizontal shift to apply (can be fractional).
 
     Returns:
-        np.float32: The color-accurate interpolated pixel value.
+        The color-accurate interpolated pixel value.
 
     """
 
@@ -984,7 +984,7 @@ def _parallel_tile_processor(
 
 @register_step(ISPStep.ALIGN_AND_MERGE)
 def merge_images(
-    burst_images: list[np.ndarray],
+    burst_images: np.ndarray,
     metadata: list[dict[str, Any]],
     tile_size: int = 32,
     max_search_radius: int = 32,
@@ -998,7 +998,7 @@ def merge_images(
     while the final merge occurs at the original RAW resolution.
 
     Args:
-        burst_images: A list of RAW images (2D numpy arrays).
+        burst_images: A numpy array of shape (N, H, W) containing images from the burst.
         metadata: A list of dictionaries containing per-frame sensor metadata (e.g.,
             exposure time, black level).
         tile_size: The width/height of the processing tile in full-resolution pixels.
@@ -1008,11 +1008,10 @@ def merge_images(
             Should be multiple of 8 and at least 32.
 
     Returns:
-        np.ndarray: The merged RAW image of shape (H, W), normalized by tile weights.
+        The merged RAW image of shape (H, W), normalized by tile weights.
 
     Raises:
         ValueError: If fewer than two images are provided.
-        ValueError: If the images in the burst have inconsistent shapes.
         RuntimeError: If tile parameters are incompatible with the downsampling factor.
         ValueError: If max_search_radius is not a multiple of 8.
 
@@ -1020,9 +1019,6 @@ def merge_images(
 
     if len(burst_images) <= 1:
         raise ValueError(f"At least two images needed for Align&Merge, but got {len(burst_images)}.")
-
-    if len({x.shape for x in burst_images}) != 1:
-        raise ValueError("All images in the burst must have the same shape.")
 
     if not all(metadata[0]["ExposureTime"] == mtd["ExposureTime"] for mtd in metadata[1:]):
         logger.info(
