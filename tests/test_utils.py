@@ -146,24 +146,24 @@ class TestFindBestLayout:
 class TestFindBestFigsize:
     def test_find_figsize_default(self):
         """Test finding figure size with default width."""
-        images = [np.random.rand(100, 100)]
-        fig_width, fig_height = find_best_figsize(images, nrow=1, ncol=1)
+        image = np.random.rand(100, 100)
+        fig_width, fig_height = find_best_figsize(image, nrow=1, ncol=1)
 
         assert fig_width == 6.0  # Default base width
         assert fig_height == 6.0
 
     def test_find_figsize_custom_width(self):
         """Test finding figure size with custom width."""
-        images = [np.random.rand(100, 100)]
-        fig_width, fig_height = find_best_figsize(images, nrow=2, ncol=2, inch_width_pre_image=4)
+        image = np.random.rand(100, 100)
+        fig_width, fig_height = find_best_figsize(image, nrow=2, ncol=2, inch_width_pre_image=4)
 
         assert fig_width == 8.0  # 4 * 2 columns
         assert fig_height == 8.0  # 4 * 1 aspect ratio * 2 rows
 
     def test_find_figsize_different_aspect_ratio(self):
         """Test finding figure size with different aspect ratio."""
-        images = [np.random.rand(200, 100)]  # Aspect ratio 2:1
-        fig_width, fig_height = find_best_figsize(images, nrow=1, ncol=1)
+        image = np.random.rand(200, 100)  # Aspect ratio 2:1
+        fig_width, fig_height = find_best_figsize(image, nrow=1, ncol=1)
 
         assert fig_width == 6.0
         assert math.isclose(fig_height, 12.0)  # 6 * 2 aspect ratio
