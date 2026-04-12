@@ -11,11 +11,11 @@ def retrieve_black_levels(raw_image: np.ndarray, metadata: dict[str, Any]) -> np
     Retrieves black level values from metadata or, if absent, calculates them from the image.
 
     Args:
-        raw_image (np.ndarray): The input raw image.
-        metadata (dict[str, any]): Dictionary containing metadata.
+        raw_image: The input raw image.
+        metadata: Dictionary containing metadata.
 
     Returns:
-        np.ndarray: Array of black level values.
+        Array of black level values.
 
     Raises:
         ValueError: If black levels are larger than the image's maximum pixel value.
@@ -62,12 +62,12 @@ def subtract_black_levels(raw_image: np.ndarray, metadata: dict[str, Any], inpla
     Even when no light hits the sensor, the output signal is not zero due to this offset, known as the black level.
 
     Args:
-        raw_image (np.ndarray): The input raw image as a NumPy array in float32.
-        metadata (dict[str, any]): Dictionary containing metadata, including "BlackLevel".
-        inplace (bool): Whether to perform the operation in-place.
+        raw_image: The input raw image as a NumPy array in float32.
+        metadata: Dictionary containing metadata, including "BlackLevel".
+        inplace: Whether to perform the operation in-place.
 
     Returns:
-        np.ndarray: The raw image with black levels subtracted.
+        The raw image with black levels subtracted.
 
     Raises:
         ValueError: If Raw image dtype is an unsigned integer
@@ -96,12 +96,12 @@ def normalize_image(raw_image: np.ndarray, metadata: dict[str, Any], inplace: bo
     Normalizes the raw image into range [0, 1] using black and white levels.
 
     Args:
-        raw_image (np.ndarray): The input raw image.
-        metadata (dict[str, any]): Dictionary containing metadata.
-        inplace (bool): Whether to perform the operation in-place.
+        raw_image: The input raw image.
+        metadata: Dictionary containing metadata.
+        inplace: Whether to perform the operation in-place.
 
     Returns:
-        np.ndarray: The normalized image.
+        The normalized image.
 
     Raises:
         ValueError: If WhiteLevel from metadata is invalid
@@ -128,20 +128,20 @@ def normalize_image(raw_image: np.ndarray, metadata: dict[str, Any], inplace: bo
 
 @register_step(ISPStep.BLACK_LEVEL_SUBTRACTION)
 def apply_black_level_subtraction(
-    raw_images: Sequence[np.ndarray],
+    raw_images: np.ndarray,
     metadata: Sequence[dict[str, Any]],
     inplace: bool = False,
-) -> Sequence[np.ndarray]:
+) -> np.ndarray:
     """
     Subtracts black levels from the raw image and normalizes into range [0, 1] using black and white levels.
 
     Args:
-        raw_images (Sequence of np.ndarray): The input raw image.
-        metadata (Sequence of dict[str, any]): Dictionary containing metadata.
-        inplace (bool): Whether to perform the operation in-place.
+        raw_images: 3D Numpy array of shape (N, H, W) containing raw images.
+        metadata: Dictionary containing metadata.
+        inplace: Whether to perform the operation in-place.
 
     Returns:
-        Sequence of np.ndarray: Image after black level subtraction and normalization to range [0, 1].
+        Images after black level subtraction and normalization to range [0, 1]. Shape is (N, H, W).
 
     """
 
@@ -153,4 +153,4 @@ def apply_black_level_subtraction(
         raw_image = normalize_image(raw_image, mt, inplace=True)
         result_images.append(raw_image)
 
-    return result_images
+    return np.array(result_images, dtype=np.float32)
