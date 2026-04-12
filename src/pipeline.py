@@ -57,6 +57,8 @@ class ISPPipeline:
 
         Returns:
             Processed images as a numpy array of shape (N, H, W).
+                If a burst is provided and Align&Merge step is included - the output is a single image
+                of shape (H, W).
 
         """
 
@@ -113,7 +115,7 @@ class ISPPipeline:
 
         Args:
             step: The ISPStep enum value representing the step to execute.
-            image_input: 3D Numpy array of shape (N, H, W) containing input images.
+            image_input: 3D Numpy array of shape (N, H, W) containing raw images.
             metadata: A sequence of dictionaries containing metadata for each image.
             config_overrides: An optional dictionary containing any configuration overrides specific to this step.
 
