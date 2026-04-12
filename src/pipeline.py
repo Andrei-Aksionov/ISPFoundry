@@ -35,19 +35,18 @@ class ISPPipeline:
             importlib.import_module(f"pipeline_steps.{module_name}")
             logger.info(f"Loaded: {module_name}")
 
-    # TODO (andrei aksionau): input and output need to be numpy array (3D), not a list
     def run(
         self,
-        raw_imgs: Sequence[np.ndarray],
+        raw_input: np.ndarray,
         metadata: Sequence[dict],
         config_overrides: dict[ISPStep, Any] | None = None,
         save_to_folder: Path | None = None,
-    ) -> list[np.ndarray]:
+    ) -> np.ndarray:
         """
         Executes the image processing pipeline on a sequence of raw images.
 
         Args:
-            raw_imgs: A sequence of raw input images (NumPy arrays).
+            raw_input: 3D Numpy array of shape (N, H, W) containing raw images.
             metadata: A sequence of dictionaries containing metadata for each image.
             config_overrides: An optional dictionary to override default parameters for specific
                     ISP steps. The keys are ISPStep enum values and values are
@@ -57,12 +56,12 @@ class ISPPipeline:
                             will be saved to this folder.
 
         Returns:
-            A list of processed images as NumPy arrays.
+            Processed images as a numpy array of shape (N, H, W).
 
         """
 
         # 1. Preparation
-        image_input = [ri.copy() for ri in raw_imgs]
+        image_input = raw_input.copy()
         config_overrides = config_overrides or {}
         telemetry = []
 
@@ -87,7 +86,7 @@ class ISPPipeline:
             if save_to_folder:
                 telemetry.append((step, elapsed))
                 # before burst merging the input contains multiple images
-                payload_to_save = image_input[0] if isinstance(image_input, Sequence) else image_input
+                payload_to_save = image_input[0] if image_input.ndim == 3 else image_input
                 # if though the image is normalized to range [0, 1] during the pipeline values might
                 # exceed this range which is important statistics and clipping should be done only right before saving
                 payload_to_save = payload_to_save.clip(0, 1)
@@ -105,21 +104,21 @@ class ISPPipeline:
     def _execute_step(
         self,
         step: ISPStep,
-        image_input: np.ndarray | list[np.ndarray],
+        image_input: np.ndarray,
         metadata: Sequence[dict],
         config_overrides: dict,
-    ) -> list[np.ndarray]:
+    ) -> np.ndarray:
         """
         Executes a specific ISP step from the ISP registry with provided configuration overrides.
 
         Args:
             step: The ISPStep enum value representing the step to execute.
-            image_input: The input images, which can be either a single NumPy array or a list of arrays.
+            image_input: 3D Numpy array of shape (N, H, W) containing raw images.
             metadata: A sequence of dictionaries containing metadata for each image.
             config_overrides: An optional dictionary containing any configuration overrides specific to this step.
 
         Returns:
-            A list of processed images as NumPy arrays.
+            Processed images as a numpy array of shape (N, H, W).
 
         Raises:
             ValueError: If an ISP step specified in the pipeline has no corresponding implementation registered.
