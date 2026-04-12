@@ -113,7 +113,7 @@ class ISPPipeline:
 
         Args:
             step: The ISPStep enum value representing the step to execute.
-            image_input: 3D Numpy array of shape (N, H, W) containing raw images.
+            image_input: 3D Numpy array of shape (N, H, W) containing input images.
             metadata: A sequence of dictionaries containing metadata for each image.
             config_overrides: An optional dictionary containing any configuration overrides specific to this step.
 

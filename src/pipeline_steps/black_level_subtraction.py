@@ -136,7 +136,7 @@ def apply_black_level_subtraction(
     Subtracts black levels from the raw image and normalizes into range [0, 1] using black and white levels.
 
     Args:
-        raw_images: 3D Numpy array of shape (N, H, W) containing raw images.
+        raw_images: 3D Numpy array of shape (N, H, W) containing input images.
         metadata: Dictionary containing metadata.
         inplace: Whether to perform the operation in-place.
 
