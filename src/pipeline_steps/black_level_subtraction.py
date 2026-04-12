@@ -128,7 +128,7 @@ def normalize_image(raw_image: np.ndarray, metadata: dict[str, Any], inplace: bo
 
 @register_step(ISPStep.BLACK_LEVEL_SUBTRACTION)
 def apply_black_level_subtraction(
-    raw_images: np.ndarray,
+    image_inputs: np.ndarray,
     metadata: Sequence[dict[str, Any]],
     inplace: bool = False,
 ) -> np.ndarray:
@@ -136,7 +136,7 @@ def apply_black_level_subtraction(
     Subtracts black levels from the raw image and normalizes into range [0, 1] using black and white levels.
 
     Args:
-        raw_images: 3D Numpy array of shape (N, H, W) containing input images.
+        image_inputs: 3D Numpy array of shape (N, H, W) containing input images.
         metadata: Dictionary containing metadata.
         inplace: Whether to perform the operation in-place.
 
@@ -145,12 +145,10 @@ def apply_black_level_subtraction(
 
     """
 
-    result_images = []
+    processed_images = image_inputs if inplace else image_inputs.copy()
 
-    for raw_image, mt in zip(raw_images, metadata):
-        raw_image = raw_image if inplace else raw_image.copy()
-        raw_image = subtract_black_levels(raw_image, mt, inplace=True)
-        raw_image = normalize_image(raw_image, mt, inplace=True)
-        result_images.append(raw_image)
+    for img, mtd in zip(processed_images, metadata):
+        subtract_black_levels(img, mtd, inplace=True)
+        normalize_image(img, mtd, inplace=True)
 
-    return np.array(result_images, dtype=np.float32)
+    return processed_images

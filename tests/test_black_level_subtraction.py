@@ -195,39 +195,37 @@ class TestNormalizeImage:
 
 class TestApplyBlackLevelSubtraction:
     def test_apply_black_level_subtraction(self, sample_raw_image, sample_metadata):
-        result_images = apply_black_level_subtraction([sample_raw_image], [sample_metadata])
+        result_images = apply_black_level_subtraction(sample_raw_image[None, ...], [sample_metadata])
         expected_normalized = normalize_image(subtract_black_levels(sample_raw_image, sample_metadata), sample_metadata)
         np.testing.assert_array_equal(result_images[0], expected_normalized)
 
     def test_apply_black_level_subtraction_inplace_true(self, sample_raw_image, sample_metadata):
-        result_images = apply_black_level_subtraction([sample_raw_image], [sample_metadata], inplace=True)
+        result_images = apply_black_level_subtraction(sample_raw_image[None, ...], [sample_metadata], inplace=True)
         assert np.shares_memory(sample_raw_image, result_images[0])
 
     def test_apply_black_level_subtraction_inplace_false(self, sample_raw_image, sample_metadata):
-        result_images = apply_black_level_subtraction([sample_raw_image], [sample_metadata], inplace=False)
+        result_images = apply_black_level_subtraction(sample_raw_image[None, ...], [sample_metadata], inplace=False)
         assert not np.shares_memory(sample_raw_image, result_images[0])
 
     def test_apply_black_level_subtraction_multiple_images(self):
-        raw_images = [
-            np.array(
+        raw_images = np.array(
+            [
                 [
                     [100, 110, 120, 130],
                     [140, 150, 160, 170],
                     [180, 190, 200, 210],
                     [220, 230, 240, 250],
                 ],
-                dtype=np.float32,
-            ),
-            np.array(
                 [
                     [200, 210, 220, 230],
                     [240, 250, 260, 270],
                     [280, 290, 300, 310],
                     [320, 330, 340, 350],
                 ],
-                dtype=np.float32,
-            ),
-        ]
+            ],
+            dtype=np.float32,
+        )
+
         metadata = [
             {
                 "BlackLevel": [50, 60, 70, 80],  # R, Gr, Gb, B
@@ -245,15 +243,17 @@ class TestApplyBlackLevelSubtraction:
         np.testing.assert_array_equal(result_images[1], expected_normalized_2)
 
     def test_apply_black_level_subtraction_no_metadata(self):
-        raw_image = np.array(
+        raw_images = np.array(
             [
-                [100, 110, 120, 130],
-                [140, 150, 160, 170],
-                [180, 190, 200, 210],
-                [220, 230, 240, 250],
+                [
+                    [100, 110, 120, 130],
+                    [140, 150, 160, 170],
+                    [180, 190, 200, 210],
+                    [220, 230, 240, 250],
+                ]
             ],
             dtype=np.float32,
         )
         metadata = {}
         with pytest.raises(ValueError, match="Metadata should contain a valid WhiteLevel"):
-            apply_black_level_subtraction([raw_image], [metadata])
+            apply_black_level_subtraction(raw_images, [metadata])
