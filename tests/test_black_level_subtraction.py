@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from pipeline_steps.black_level_subtraction import (
+from ispfoundry.pipeline_steps.black_level_subtraction import (
     apply_black_level_subtraction,
     normalize_image,
     retrieve_black_levels,

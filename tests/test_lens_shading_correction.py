@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from pipeline_steps.lens_shading_correction import (
+from ispfoundry.pipeline_steps.lens_shading_correction import (
     align_cfa_pattern,
     apply_lens_shading_correction,
     apply_single_image,

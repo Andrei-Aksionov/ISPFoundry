@@ -49,9 +49,9 @@ repos:
     # Check hyperlinks and external links
     - id: lychee-link-checker
       name: lychee-link-checker
-      verbose: true
       language: system
       require_serial: true
+      verbose: true
       entry: |
         /bin/bash -c '
         if ! command -v lychee >/dev/null 2>&1; then

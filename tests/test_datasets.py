@@ -1,4 +1,4 @@
-from datasets.hdrplus_downloader import HDRPlusDatasetDownloader
+from ispfoundry.datasets.hdrplus_downloader import HDRPlusDatasetDownloader
 
 
 class TestHDRPlusDatasetDownloader:
