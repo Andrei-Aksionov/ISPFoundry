@@ -9,8 +9,8 @@ import numpy as np
 import pytest
 from omegaconf import OmegaConf
 
-from base import ISPStep
-from pipeline import ISPPipeline
+from ispfoundry import ISPStep
+from ispfoundry.pipeline import ISPPipeline
 
 
 class MockStep:
@@ -51,35 +51,47 @@ class TestISPPipeline(unittest.TestCase):
         return reg
 
     def test_init_non_steps(self):
-        with patch("pipeline.config", self.mock_cfg), patch("pipeline.pkgutil.iter_modules", return_value=[]):
+        with (
+            patch("ispfoundry.pipeline.config", self.mock_cfg),
+            patch("ispfoundry.pipeline.pkgutil.iter_modules", return_value=[]),
+        ):
             pipeline = ISPPipeline()
             assert len(pipeline.steps) == 2
 
     def test_init_empty_list_steps(self):
-        with patch("pipeline.config", self.mock_cfg), patch("pipeline.pkgutil.iter_modules", return_value=[]):
+        with (
+            patch("ispfoundry.pipeline.config", self.mock_cfg),
+            patch("ispfoundry.pipeline.pkgutil.iter_modules", return_value=[]),
+        ):
             pipeline = ISPPipeline(steps=[])
             assert len(pipeline.steps) == 2
 
     def test_init_custom_list_steps(self):
         custom_steps = [ISPStep.BLACK_LEVEL_SUBTRACTION]
-        with patch("pipeline.config", self.mock_cfg), patch("pipeline.pkgutil.iter_modules", return_value=[]):
+        with (
+            patch("ispfoundry.pipeline.config", self.mock_cfg),
+            patch("ispfoundry.pipeline.pkgutil.iter_modules", return_value=[]),
+        ):
             pipeline = ISPPipeline(steps=custom_steps)
             assert len(pipeline.steps) == 1
             assert pipeline.steps == custom_steps
 
     def test_discover_steps_logic(self):
-        with patch("pipeline.pkgutil.iter_modules") as mock_iter:
+        with patch("ispfoundry.pipeline.pkgutil.iter_modules") as mock_iter:
             mock_iter.return_value = [(None, "test_module", False)]
-            with patch("pipeline.importlib.import_module") as mock_import, patch("pipeline.config", self.mock_cfg):
+            with (
+                patch("ispfoundry.pipeline.importlib.import_module") as mock_import,
+                patch("ispfoundry.pipeline.config", self.mock_cfg),
+            ):
                 ISPPipeline()
-                mock_import.assert_called_with("pipeline_steps.test_module")
+                mock_import.assert_called_with("ispfoundry.pipeline_steps.test_module")
 
     def test_pipeline_transformation_logic(self):
         fake_reg = self._get_fake_registry()
         with (
-            patch("pipeline.config", self.mock_cfg),
-            patch("pipeline.ISP_REGISTRY", fake_reg),
-            patch("pipeline.pkgutil.iter_modules", return_value=[]),
+            patch("ispfoundry.pipeline.config", self.mock_cfg),
+            patch("ispfoundry.pipeline.ISP_REGISTRY", fake_reg),
+            patch("ispfoundry.pipeline.pkgutil.iter_modules", return_value=[]),
         ):
             pipeline = ISPPipeline()
             results = pipeline.run(self.image_input, self.metadata)
@@ -95,9 +107,9 @@ class TestISPPipeline(unittest.TestCase):
         overrides = {MockStep.STEP_A: {"param_x": 50}}
 
         with (
-            patch("pipeline.config", self.mock_cfg),
-            patch("pipeline.ISP_REGISTRY", fake_reg),
-            patch("pipeline.pkgutil.iter_modules", return_value=[]),
+            patch("ispfoundry.pipeline.config", self.mock_cfg),
+            patch("ispfoundry.pipeline.ISP_REGISTRY", fake_reg),
+            patch("ispfoundry.pipeline.pkgutil.iter_modules", return_value=[]),
         ):
             pipeline = ISPPipeline()
             pipeline.run(self.image_input, self.metadata, config_overrides=overrides)  # ty:ignore[invalid-argument-type]
@@ -108,9 +120,9 @@ class TestISPPipeline(unittest.TestCase):
     def test_missing_step_implementation_raises_error(self):
         # Explicitly empty registry to trigger the error
         with (
-            patch("pipeline.config", self.mock_cfg),
-            patch("pipeline.ISP_REGISTRY", {}),
-            patch("pipeline.pkgutil.iter_modules", return_value=[]),
+            patch("ispfoundry.pipeline.config", self.mock_cfg),
+            patch("ispfoundry.pipeline.ISP_REGISTRY", {}),
+            patch("ispfoundry.pipeline.pkgutil.iter_modules", return_value=[]),
         ):
             pipeline = ISPPipeline()
             with pytest.raises(ValueError, match="has no implementation"):
@@ -119,10 +131,10 @@ class TestISPPipeline(unittest.TestCase):
     def test_file_saving_and_telemetry(self):
         fake_reg = self._get_fake_registry()
         with (
-            patch("pipeline.config", self.mock_cfg),
-            patch("pipeline.ISP_REGISTRY", fake_reg),
-            patch("pipeline.save_ndarray_as_jpg") as mock_save,
-            patch("pipeline.pkgutil.iter_modules", return_value=[]),
+            patch("ispfoundry.pipeline.config", self.mock_cfg),
+            patch("ispfoundry.pipeline.ISP_REGISTRY", fake_reg),
+            patch("ispfoundry.pipeline.save_ndarray_as_jpg") as mock_save,
+            patch("ispfoundry.pipeline.pkgutil.iter_modules", return_value=[]),
         ):
             pipeline = ISPPipeline()
             pipeline.run(self.image_input, self.metadata, save_to_folder=self.test_dir)
@@ -134,9 +146,9 @@ class TestISPPipeline(unittest.TestCase):
         # Empty inputs shouldn't even look at the registry, but we mock it just in case
         fake_reg = self._get_fake_registry()
         with (
-            patch("pipeline.config", self.mock_cfg),
-            patch("pipeline.ISP_REGISTRY", fake_reg),
-            patch("pipeline.pkgutil.iter_modules", return_value=[]),
+            patch("ispfoundry.pipeline.config", self.mock_cfg),
+            patch("ispfoundry.pipeline.ISP_REGISTRY", fake_reg),
+            patch("ispfoundry.pipeline.pkgutil.iter_modules", return_value=[]),
         ):
             pipeline = ISPPipeline()
             results = pipeline.run(np.array([], dtype=np.float32), [])

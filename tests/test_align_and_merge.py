@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from scipy.ndimage import gaussian_filter
 
-from pipeline_steps.align_and_merge import (
+from ispfoundry.pipeline_steps.align_and_merge import (
     compute_tile_sad,
     downsample_luma_proxy,
     estimate_noise_profile,
@@ -461,7 +461,7 @@ class TestGetNoiseProfile:
         image = np.random.rand(10, 10).astype(np.float32)
 
         # Mocking the estimation function to verify it's reached
-        with patch("pipeline_steps.align_and_merge.estimate_noise_profile") as mock_estimate:
+        with patch("ispfoundry.pipeline_steps.align_and_merge.estimate_noise_profile") as mock_estimate:
             mock_estimate.return_value = (np.ones((2, 2)), np.zeros((2, 2)))
 
             get_noise_profile(image, sample_metadata)
@@ -863,7 +863,7 @@ class TestFindBestFloatOffset:
 
         # We mock compute_tile_sad to return a grid that results in a known shift.
         # If neighbors are symmetric, find_subpixel_shift returns (0, 0).
-        with patch("pipeline_steps.align_and_merge.compute_tile_sad", return_value=10.0):
+        with patch("ispfoundry.pipeline_steps.align_and_merge.compute_tile_sad", return_value=10.0):
             # .py_func calls the raw Python logic, ignoring the @njit decorator
             dy, dx, sad = find_best_float_offset.py_func(
                 ref, tgt, 0, 0, 8, best_dy_int=5, best_dx_int=-3, min_sad=5.0, inv_sigma=1.0
@@ -889,7 +889,7 @@ class TestFindBestFloatOffset:
         def side_effect(dy, dx, *args, **kwargs):
             return sad_values.get((dy, dx), 3.0)
 
-        with patch("pipeline_steps.align_and_merge.compute_tile_sad", side_effect=side_effect):
+        with patch("ispfoundry.pipeline_steps.align_and_merge.compute_tile_sad", side_effect=side_effect):
             dy, dx, _ = find_best_float_offset.py_func(
                 ref, tgt, 0, 0, 8, best_dy_int=5, best_dx_int=5, min_sad=1.0, inv_sigma=1.0
             )
@@ -908,7 +908,7 @@ class TestFindBestFloatOffset:
                 return None  # Up
             return 15.0  # All others
 
-        with patch("pipeline_steps.align_and_merge.compute_tile_sad", side_effect=side_effect):
+        with patch("ispfoundry.pipeline_steps.align_and_merge.compute_tile_sad", side_effect=side_effect):
             dy, dx, _ = find_best_float_offset.py_func(
                 ref, tgt, 0, 0, 8, best_dy_int=5, best_dx_int=5, min_sad=10.0, inv_sigma=1.0
             )
@@ -931,7 +931,7 @@ class TestFindBestFloatOffset:
                 return 5.0  # Down
             return 12.0
 
-        with patch("pipeline_steps.align_and_merge.compute_tile_sad", side_effect=side_effect):
+        with patch("ispfoundry.pipeline_steps.align_and_merge.compute_tile_sad", side_effect=side_effect):
             # This shouldn't crash and should produce a clamped/stable float
             dy, dx, _ = find_best_float_offset.py_func(
                 ref, tgt, 0, 0, 8, best_dy_int=5, best_dx_int=5, min_sad=10.0, inv_sigma=1.0
@@ -968,8 +968,8 @@ class TestFindBestOffset:
 
         # We need to mock both the integer search and the final float refinement
         with (
-            patch("pipeline_steps.align_and_merge.find_best_integer_offset") as mock_int,
-            patch("pipeline_steps.align_and_merge.find_best_float_offset") as mock_float,
+            patch("ispfoundry.pipeline_steps.align_and_merge.find_best_integer_offset") as mock_int,
+            patch("ispfoundry.pipeline_steps.align_and_merge.find_best_float_offset") as mock_float,
         ):
             # Setup mock returns: (dy, dx, sad)
             # Level 2 returns (1, 1, 0.5)
@@ -1015,8 +1015,8 @@ class TestFindBestOffset:
         L0, L1, L2 = dummy_pyramid  # All zeros
 
         with (
-            patch("pipeline_steps.align_and_merge.find_best_integer_offset") as mock_int,
-            patch("pipeline_steps.align_and_merge.find_best_float_offset") as mock_float,
+            patch("ispfoundry.pipeline_steps.align_and_merge.find_best_integer_offset") as mock_int,
+            patch("ispfoundry.pipeline_steps.align_and_merge.find_best_float_offset") as mock_float,
         ):
             mock_int.return_value = (0, 0, 0.0)
             mock_float.return_value = (0.0, 0.0, 0.0)
@@ -1368,7 +1368,7 @@ class TestMergeTile:
         target = np.zeros((16, 16), dtype=np.float32)
 
         # We mock the sampler to ensure it's receiving the correct float offsets
-        with patch("pipeline_steps.align_and_merge.sample_raw_bilinear", return_value=0.7) as mock_sample:
+        with patch("ispfoundry.pipeline_steps.align_and_merge.sample_raw_bilinear", return_value=0.7) as mock_sample:
             merge_tile.py_func(
                 merged_acc,
                 weights_acc,
@@ -1423,12 +1423,14 @@ class TestMergeImages:
 
         # 2. Force index 1 to be the "sharpest"
         with (
-            patch("pipeline_steps.align_and_merge.find_sharpest_image_idx", return_value=1),
-            patch("pipeline_steps.align_and_merge._parallel_tile_processor") as mock_proc,
-            patch("pipeline_steps.align_and_merge.get_luma_proxy", return_value=np.zeros((32, 32))),
-            patch("pipeline_steps.align_and_merge.get_noise_profile", return_value=(np.zeros(1), np.zeros(1))),
-            patch("pipeline_steps.align_and_merge.get_photometric_scalers", return_value=[1.0, 1.0]),
-            patch("pipeline_steps.align_and_merge.get_hann_window_2d", return_value=np.ones((32, 32))),
+            patch("ispfoundry.pipeline_steps.align_and_merge.find_sharpest_image_idx", return_value=1),
+            patch("ispfoundry.pipeline_steps.align_and_merge._parallel_tile_processor") as mock_proc,
+            patch("ispfoundry.pipeline_steps.align_and_merge.get_luma_proxy", return_value=np.zeros((32, 32))),
+            patch(
+                "ispfoundry.pipeline_steps.align_and_merge.get_noise_profile", return_value=(np.zeros(1), np.zeros(1))
+            ),
+            patch("ispfoundry.pipeline_steps.align_and_merge.get_photometric_scalers", return_value=[1.0, 1.0]),
+            patch("ispfoundry.pipeline_steps.align_and_merge.get_hann_window_2d", return_value=np.ones((32, 32))),
         ):
             # No .py_func needed if merge_images isn't @njit
             merge_images(mock_burst, mock_metadata)
@@ -1462,9 +1464,12 @@ class TestMergeImages:
             kwargs["weights_accumulator"] += 2.0  # Total weight is 2.0
 
         with (
-            patch("pipeline_steps.align_and_merge._parallel_tile_processor", side_effect=mock_fill),
-            patch("pipeline_steps.align_and_merge.get_luma_proxy", return_value=np.zeros((8, 8))),
-            patch("pipeline_steps.align_and_merge.get_noise_profile", return_value=(np.array([0]), np.array([0]))),
+            patch("ispfoundry.pipeline_steps.align_and_merge._parallel_tile_processor", side_effect=mock_fill),
+            patch("ispfoundry.pipeline_steps.align_and_merge.get_luma_proxy", return_value=np.zeros((8, 8))),
+            patch(
+                "ispfoundry.pipeline_steps.align_and_merge.get_noise_profile",
+                return_value=(np.array([0]), np.array([0])),
+            ),
         ):
             result = merge_images(burst, mock_metadata, tile_size=8)
 
@@ -1478,9 +1483,12 @@ class TestMergeImages:
         mock_metadata[0]["ISO"] = 400
 
         with (
-            patch("pipeline_steps.align_and_merge._parallel_tile_processor") as mock_proc,
-            patch("pipeline_steps.align_and_merge.get_luma_proxy", return_value=np.zeros((32, 32))),
-            patch("pipeline_steps.align_and_merge.get_noise_profile", return_value=(np.array([0]), np.array([0]))),
+            patch("ispfoundry.pipeline_steps.align_and_merge._parallel_tile_processor") as mock_proc,
+            patch("ispfoundry.pipeline_steps.align_and_merge.get_luma_proxy", return_value=np.zeros((32, 32))),
+            patch(
+                "ispfoundry.pipeline_steps.align_and_merge.get_noise_profile",
+                return_value=(np.array([0]), np.array([0])),
+            ),
         ):
             merge_images(mock_burst, mock_metadata)
 
@@ -1718,7 +1726,7 @@ class TestMergeImages:
         # --- 4. Verify Numba Configuration ---
         # We check the dispatcher for the parallel tile processor
         # (assuming it's the core JIT function)
-        from pipeline_steps.align_and_merge import _parallel_tile_processor
+        from ispfoundry.pipeline_steps.align_and_merge import _parallel_tile_processor
 
         target_parallel = _parallel_tile_processor.targetoptions.get("parallel", False)
         target_fastmath = _parallel_tile_processor.targetoptions.get("fastmath", False)
@@ -1735,15 +1743,15 @@ class TestMergeImages:
         # b) Execute Pure Python variant
         # We use .py_func to bypass the Numba JIT wrapper entirely
         # We temporarily swap the JIT function with its Python original
-        import pipeline_steps.align_and_merge
+        from ispfoundry.pipeline_steps import align_and_merge
 
-        original_processor = pipeline_steps.align_and_merge._parallel_tile_processor
+        original_processor = align_and_merge._parallel_tile_processor
         try:
-            pipeline_steps.align_and_merge._parallel_tile_processor = original_processor.py_func
-            merged_python = pipeline_steps.align_and_merge.merge_images(burst, metadata)
+            align_and_merge._parallel_tile_processor = original_processor.py_func
+            merged_python = align_and_merge.merge_images(burst, metadata)
         finally:
             # Restore the JIT version
-            pipeline_steps.align_and_merge._parallel_tile_processor = original_processor
+            align_and_merge._parallel_tile_processor = original_processor
 
         # 6. Evaluation
         # We check for bit-exact identity.

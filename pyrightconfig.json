@@ -1,16 +1,18 @@
 {
   "include": [
-    "src",
+    "ispfoundry",
     "notebooks"
   ],
   "exclude": [
+    "**/.*",
+    "**/node_modules",
     "**/__pycache__",
     ".venv"
   ],
   "executionEnvironments": [
     {
       "root": ".",
-      "extraPaths": ["src"]
+      "extraPaths": ["ispfoundry"]
     }
   ],
   "typeCheckingMode": "off",

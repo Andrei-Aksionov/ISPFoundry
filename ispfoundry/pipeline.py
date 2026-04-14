@@ -8,10 +8,9 @@ from typing import Any, Sequence
 import numpy as np
 from loguru import logger
 
-import pipeline_steps
-from base import ISP_REGISTRY, ISPStep
-from configs.config_loader import config
-from utils import save_ndarray_as_jpg
+from ispfoundry import ISP_REGISTRY, ISPStep, pipeline_steps
+from ispfoundry.configs.config_loader import config
+from ispfoundry.utils import save_ndarray_as_jpg
 
 
 class ISPPipeline:
@@ -32,7 +31,7 @@ class ISPPipeline:
 
         logger.info(" Discovering Pipeline Step Implementations ".center(50, "-"))
         for _, module_name, _ in pkgutil.iter_modules(pipeline_steps.__path__):
-            importlib.import_module(f"pipeline_steps.{module_name}")
+            importlib.import_module(f"ispfoundry.pipeline_steps.{module_name}")
             logger.info(f"Loaded: {module_name}")
 
     def run(

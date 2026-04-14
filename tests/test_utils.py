@@ -4,7 +4,7 @@ import os
 import numpy as np
 import pytest
 
-from utils import (
+from ispfoundry.utils import (
     decode_cfa,
     find_best_figsize,
     find_best_layout,
@@ -21,7 +21,7 @@ class TestGetGitRoot:
         git_dir = tmp_path / ".git"
         git_dir.mkdir()
 
-        working_dir = tmp_path / "src"
+        working_dir = tmp_path / "ispfoundry"
         working_dir.mkdir()
 
         os.chdir(working_dir)

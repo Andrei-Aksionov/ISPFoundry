@@ -1,6 +1,6 @@
 from typing import Any
 
-from base import ISP_REGISTRY, ISPStep, register_step
+from ispfoundry import ISP_REGISTRY, ISPStep, register_step
 
 
 class TestBase:

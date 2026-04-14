@@ -2,9 +2,9 @@ import cv2
 import numpy as np
 from loguru import logger
 
-from base import ISPStep, register_step
-from configs.config_loader import config
-from utils import decode_cfa
+from ispfoundry import ISPStep, register_step
+from ispfoundry.configs.config_loader import config
+from ispfoundry.utils import decode_cfa
 
 
 def align_cfa_pattern(lsc_maps: list[np.ndarray], metadata: list[dict]) -> list[np.ndarray]:
