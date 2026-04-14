@@ -3,7 +3,7 @@ from typing import Any, Sequence
 import numpy as np
 from loguru import logger
 
-from base import ISPStep, register_step
+from ispfoundry import ISPStep, register_step
 
 
 def retrieve_black_levels(raw_image: np.ndarray, metadata: dict[str, Any]) -> np.ndarray:

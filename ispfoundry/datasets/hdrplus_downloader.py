@@ -5,8 +5,8 @@ from shutil import rmtree
 
 from loguru import logger
 
-from configs.config_loader import config
-from utils import get_git_root
+from ispfoundry.configs.config_loader import config
+from ispfoundry.utils import get_git_root
 
 
 class HDRPlusDatasetDownloader:

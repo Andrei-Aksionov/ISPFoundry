@@ -1,6 +1,11 @@
 from enum import Enum
 from typing import Any, Callable
 
+__all__ = [
+    "ISPStep",
+    "register_step",
+]
+
 
 class ISPStep(str, Enum):
     BLACK_LEVEL_SUBTRACTION = "black_level_subtraction"

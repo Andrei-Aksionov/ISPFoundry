@@ -7,7 +7,7 @@ from scipy import stats
 from scipy.ndimage import convolve, gaussian_filter
 from tqdm import trange
 
-from base import ISPStep, register_step
+from ispfoundry import ISPStep, register_step
 
 # --------------------------------- Luma Proxy & Exposure Functions ----------------------------------
 
