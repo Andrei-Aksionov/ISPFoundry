@@ -118,3 +118,6 @@ data
 *nbqa_ipynb.py
 
 _debug/
+
+### Lychee cache
+.lycheecache
