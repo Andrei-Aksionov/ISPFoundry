@@ -78,22 +78,6 @@ class TestDatasetLoader:
         assert metadata[1]["white_level"] == 1000
         assert metadata[1]["color_desc"] == "RGBG"
 
-    @patch("tifffile.imread")
-    def test_get_lsc_maps_alignment(self, mock_tifffile, mock_folder):
-        """Tests that missing LSC maps return None and maintain index alignment."""
-        # Delete one of the LSC maps to test the 'missing file' logic
-        (mock_folder / "lens_shading_map_002.tiff").unlink()
-
-        mock_tifffile.return_value = np.ones((4, 4), dtype=np.uint16)
-
-        loader = DatasetLoader(mock_folder, dtype=np.float32)
-        maps = loader.get_lens_shading_correction_maps()
-
-        assert len(maps) == 2
-        assert isinstance(maps[0], np.ndarray)
-        assert maps[0].dtype == np.float32
-        assert maps[1] is None  # Second map was deleted
-
     @patch("rawpy.imread")
     @patch("tifffile.imread")
     @patch("ispfoundry.datasets.dataset_loader.get_exif_metadata")
@@ -110,3 +94,28 @@ class TestDatasetLoader:
         assert loader.raw_images is not None
         assert len(loader.metadata) == 2
         assert len(loader.lsc_maps) == 2
+
+    @patch("tifffile.imread")
+    def test_get_lsc_maps_success(self, mock_tifffile, mock_folder):
+        """Tests successful loading of all LSC maps."""
+        # Mock the return of tifffile.imread
+        mock_tifffile.return_value = np.ones((4, 4), dtype=np.uint16)
+
+        loader = DatasetLoader(mock_folder, dtype=np.float32)
+        maps = loader.get_lens_shading_correction_maps()
+
+        assert len(maps) == 2
+        assert all(isinstance(m, np.ndarray) for m in maps)
+        assert maps[0].dtype == np.float32
+
+    @patch("tifffile.imread")
+    def test_get_lsc_maps_raises_error(self, mock_tifffile, mock_folder):
+        """Tests that a missing LSC map raises a FileNotFoundError."""
+        # Only create one DNG but NO tiff file
+        (mock_folder / "payload_999.dng").touch()
+
+        loader = DatasetLoader(mock_folder)
+
+        # Verify that the specific error is raised
+        with pytest.raises(FileNotFoundError, match="LSC map not found"):
+            loader.get_lens_shading_correction_maps()

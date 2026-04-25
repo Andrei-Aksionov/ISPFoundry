@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -33,9 +33,9 @@ class DatasetLoader:
 
         self.dng_file_paths = sorted(self.folder_path.glob("payload_*.dng"))
 
-        self.raw_images: Optional[np.ndarray] = None
-        self.metadata: List[Dict[str, Any]] = []
-        self.lsc_maps: List[Optional[np.ndarray]] = []
+        self.raw_images: np.ndarray
+        self.metadata: List[Dict[str, Any]]
+        self.lsc_maps: List[np.ndarray]
 
     def load_data(self) -> None:
         """
@@ -56,7 +56,7 @@ class DatasetLoader:
                 cast to the specified self.dtype.
 
         """
-        logger.info(f"Loading RAW images as {self.dtype}")
+        logger.info(f"Loading RAW images as `{np.dtype(self.dtype).name}`")
         raw_images = []
         for dp in self.dng_file_paths:
             with rawpy.imread(str(dp)) as raw_obj:
@@ -97,29 +97,32 @@ class DatasetLoader:
 
         return metadata
 
-    def get_lens_shading_correction_maps(self) -> List[Optional[np.ndarray]]:
+    def get_lens_shading_correction_maps(self) -> List[np.ndarray]:
         """
         Loads lens shading correction (LSC) maps associated with the DNG files.
 
-        Expects TIFF files named 'lens_shading_map_*.tiff' corresponding to
-        each 'payload_*.dng' file.
-
         Returns:
-            List[Optional[np.ndarray]]: A list of 2D or 3D numpy arrays cast to
-                self.dtype representing the gain maps. Returns None for missing files.
+            List[np.ndarray]: A list of numpy arrays cast to self.dtype
+                representing the gain maps.
+
+        Raises:
+            FileNotFoundError: If a corresponding LSC TIFF file is missing
+                for any discovered DNG file.
 
         """
-        logger.info(f"Loading lens shading correction maps as {self.dtype}")
+
+        logger.info(f"Loading lens shading correction maps as `{np.dtype(self.dtype).name}`")
         lsc_maps = []
         for dp in self.dng_file_paths:
             lsc_name = dp.name.replace("payload", "lens_shading_map")
             lsc_path = (dp.parent / lsc_name).with_suffix(".tiff")
 
-            if lsc_path.exists():
-                lsc_map = tifffile.imread(lsc_path).astype(self.dtype)
-                lsc_maps.append(lsc_map)
-            else:
-                logger.warning(f"LSC map not found: {lsc_path}")
-                lsc_maps.append(None)
+            if not lsc_path.exists():
+                error_msg = f"LSC map not found for {dp.name}. Expected: {lsc_path.name}"
+                logger.error(error_msg)
+                raise FileNotFoundError(error_msg)
+
+            lsc_map = tifffile.imread(lsc_path).astype(self.dtype)
+            lsc_maps.append(lsc_map)
 
         return lsc_maps
