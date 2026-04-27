@@ -1042,8 +1042,6 @@ def merge_images(
 
     # Adaptive Robustness (k): Increase k at higher ISOs to allow more temporal averaging (denoising) when the signal is weak.
     current_iso = metadata[0].iso
-    if not current_iso:
-        raise RuntimeError("ISO is not provided in the metadata.")
     stops = np.log2(current_iso / 100.0)
     # VW-SAD scores are in "sigma units", k = 1.0 means we trust differences up to 1 standard deviation.
     k_adaptive = 1.0 + (0.5 * stops)

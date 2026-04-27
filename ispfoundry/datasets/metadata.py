@@ -1,8 +1,10 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import rawpy
+from loguru import logger
 
 from ispfoundry.utils import get_exif_metadata
 
@@ -10,125 +12,270 @@ from ispfoundry.utils import get_exif_metadata
 @dataclass(kw_only=True, slots=True)
 class Metadata:
     file_path: Path
+    """
+    The absolute or relative filesystem path to the source DNG (Digital Negative) file.
+    This is used for reference and for re-loading raw data if necessary during later
+    stages of the pipeline.
+    """
+
     image_width: int
+    """
+    The total horizontal pixel count of the image sensor data. In the context of
+    raw files, this often refers to the 'active' area width, excluding non-image
+    optical black pixels used for internal sensor calibration.
+    """
+
     image_height: int
-    black_levels: np.ndarray | None
+    """
+    The total vertical pixel count of the image sensor data. Similar to width,
+    this represents the number of rows of pixels captured by the sensor that
+    contain actual light information.
+    """
+
+    black_levels: np.ndarray
+    """
+    A set of values (typically four) representing the 'dark current' or pedestal
+    level for each color channel in the Bayer pattern (e.g., R, Gr, Gb, B).
+    Since sensors record some electrical noise even in total darkness, these
+    values must be subtracted to ensure that 'true black' in the scene results
+    in a numerical value of zero.
+    """
+
     white_level: int
+    """
+    The maximum possible numerical value a pixel can reach before it saturates.
+    Any light intensity beyond this point is clipped. This value is critical for
+    normalization, allowing the pipeline to map raw sensor readings into a
+    standard 0.0 to 1.0 floating-point range.
+    """
+
     color_description: str
+    """
+    A string (usually 4 characters like 'RGBG' or 'RGGB') that maps the sequence
+    of colors in the raw sensor's filter array. This tells the ISP which
+    pixel represents Red, Green, or Blue, which is essential for the
+    'demosaicing' process that reconstructs a full-color image.
+    """
+
     raw_pattern: np.ndarray
+    """
+    A 2x2 numerical matrix indicating the physical arrangement of the color
+    filters on the sensor. Each number corresponds to a color index. This
+    hardware-level description ensures the ISP correctly aligns its processing
+    with the sensor's mosaic structure.
+    """
+
     exposure_time: float
+    """
+    The duration (in seconds) that the sensor was exposed to light. This is a
+    fundamental value for 'Align and Merge' algorithms to calculate the relative
+    brightness between different frames in a burst and to compensate for
+    motion blur.
+    """
+
     iso: int
-    cfa_plane_color: str | None
-    noise_profile: np.ndarray | None
+    """
+    The gain or sensitivity setting applied to the sensor's signal. Higher ISO
+    values amplify the signal (and the noise). This value is used by noise
+    reduction algorithms to estimate the expected variance (noise) in the
+    captured image.
+    """
+
     camera_model_name: str
+    """
+    The string identifier of the camera hardware (e.g., 'Pixel 6' or 'IMX586').
+    This is often used to look up factory-calibrated noise profiles or color
+    correction matrices specific to that sensor and lens combination.
+    """
+
+    cfa_plane_color: str | None = None
+    """
+    An optional metadata field describing the color layout of the sensor planes.
+    The ISP specifically expects this to be 'Red,Green,Blue' to ensure compatibility
+    with its internal matrix multiplication and color conversion logic.
+    """
+
+    noise_profile: np.ndarray | None = None
+    """
+    A specialized 6-element array containing 'scale' and 'offset' parameters
+    for the sensor's noise model. These parameters allow the ISP to mathematically
+    predict how much photon noise and read noise will be present at a given
+    signal intensity, enabling more effective denoising.
+    """
+
+    def __post_init__(self) -> None:
+        """Validates the metadata fields to ensure ISP steps will not fail."""
+        # 1. First, ensure non-optional fields are actually provided
+        self._check_non_optional_fields()
+
+        # 2. Then run specific value logic
+        self._validate_geometry()
+        self._validate_levels()
+        self._validate_isp_requirements()
+
+    def _check_non_optional_fields(self) -> None:
+        """Iterates through dataclass fields and raises TypeError if a non-Optional field is None."""  # noqa: DOC501
+        for field in fields(self):
+            value = getattr(self, field.name)
+
+            # Check if 'None' is a valid type for this field
+            # This handles both 'Type | None' and 'Union[Type, None]'
+            type_args = getattr(field.type, "__args__", None)
+            is_optional = type_args is not None and type(None) in type_args
+
+            if value is None and not is_optional:
+                raise TypeError(f"Field '{field.name}' is mandatory but received 'None'. Expected type: {field.type}")
+
+    def _validate_geometry(self) -> None:
+        """Ensures dimensions are positive and non-zero."""  # noqa: DOC501
+        if self.image_width <= 0 or self.image_height <= 0:
+            raise ValueError(f"Invalid dimensions: {self.image_width}x{self.image_height}")
+
+    def _validate_levels(self) -> None:
+        """Ensures black and white levels are consistent for normalization."""  # noqa: DOC501
+        if self.black_levels.size != 4:
+            raise ValueError(f"Expected 4 black level values, got {self.black_levels.size}")
+
+        # Check for saturation/underflow. Also prevents denominator == 0 in normalization.
+        if np.any(self.black_levels >= self.white_level):
+            raise ValueError(
+                f"Black levels {self.black_levels} must be strictly less than "
+                f"white level {self.white_level} to avoid zero/negative denominators."
+            )
+
+    def _validate_isp_requirements(self):
+        """Validates fields specifically required by Align&Merge and LSC steps."""  # noqa: DOC501
+        if not self.color_description or not self.color_description.strip():
+            raise ValueError("color_description is missing or empty.")
+
+        if self.raw_pattern.size == 0:
+            raise ValueError("raw_pattern cannot be empty.")
+
+        if self.cfa_plane_color is not None and self.cfa_plane_color != "Red,Green,Blue":
+            raise ValueError(f"ISP expects 'Red,Green,Blue' layout, got: {self.cfa_plane_color}")
+
+        if self.noise_profile is not None and self.noise_profile.size != 6:
+            raise ValueError(f"NoiseProfile must contain 6 values, got {self.noise_profile.size}")
+
+        if self.exposure_time <= 0:
+            raise ValueError(f"Exposure time must be positive, got {self.exposure_time}")
 
 
-def extract_metadata(file_path: Path) -> Metadata:  # noqa: D103
+def extract_metadata(file_path: Path) -> Metadata:
+    """
+    Extracts, cleans, and validates image metadata from a DNG file.
 
-    exif_data = get_exif_metadata(file_path)[0]
-    raw_obj = rawpy.imread(str(file_path))
+    This function acts as the primary ingestion point for the ISP pipeline. It
+    coordinates the extraction of hardware-level information (like sensor black
+    levels and Bayer patterns) and capture-level information (like exposure
+    time and ISO). It prioritizes EXIF data where available, falling back to
+    the raw file's internal properties (via rawpy).
 
-    # Image sizes
-    image_width = exif_data.get("ImageWidth")
-    if not image_width:
-        raise ValueError("ImageWidth is missing in the metadata.")
-    image_height = exif_data.get("ImageHeight")
-    if not image_height:
-        raise ValueError("ImageHeight is missing in the metadata.")
+    Args:
+        file_path: The filesystem path to the .dng file to be processed.
 
-    # Black Levels
-    black_levels = exif_data.get("BlackLevel")
-    black_levels = black_levels or raw_obj.black_level_per_channel
+    Returns:
+        A strictly validated Metadata instance containing all parameters
+        required for subsequent ISP processing steps.
 
-    if isinstance(black_levels, str):
-        black_levels = np.array([float(x) for x in black_levels.split()])
-    elif isinstance(black_levels, list):
-        black_levels = np.asarray(black_levels, dtype=np.float32)
+    Raises:
+        RuntimeError: If the EXIF metadata extraction fails entirely or the
+            file is inaccessible.
+        TypeError: If a metadata field (e.g., BlackLevel, ExposureTime, or
+            NoiseProfile) is found in an unexpected data format that cannot
+            be reliably parsed.
+        ValueError: If numerical values are logically inconsistent, such as:
+            - A malformed exposure time fraction (e.g., "1/0").
+            - Image dimensions that are zero or negative.
+            - Black levels that exceed or equal the white level saturation point.
+            - A noise profile that does not contain exactly 6 elements.
 
-    if black_levels.size != 4:
-        raise ValueError(f"Expected 4 black level values (e.g. RGGB), got: {black_levels}")
+    Notes:
+        - ISO values are handled leniently: if missing or non-positive, the
+          system logs a warning and defaults to 100 to allow processing to
+          continue.
+        - Exposure time is normalized to a float representing seconds,
+          handling both decimal strings and fractional strings (e.g., "1/250").
 
-    # White Level
-    white_level = exif_data.get("WhiteLevel")
-    white_level = white_level or raw_obj.white_level
-    if white_level is None or white_level == 0:
-        raise ValueError(f"Metadata should contain a valid WhiteLevel, but instead got: `{white_level}`")
+    """
 
-    if any(bl > white_level for bl in black_levels):
-        raise ValueError(
-            "Black levels cannot be larger or equal to white level (saturation point), "
-            f"but got black level values: {black_levels} and white level: {white_level}."
-        )
+    # Fetch EXIF data
+    exif_list = get_exif_metadata(file_path)
+    if not exif_list:
+        raise RuntimeError(f"Could not extract EXIF data from {file_path}")
+    exif: dict[str, Any] = exif_list[0]
 
-    if any(bl == white_level for bl in black_levels):
-        raise ValueError("WhiteLevel equals on the BlackLevels")
-
-    # Color description
-    color_description = exif_data.get("color_desc")
-    color_description = color_description or raw_obj.color_desc
-    if isinstance(color_description, bytes):
-        color_description = color_description.decode()
-
-    if not color_description:
-        raise ValueError(f"Color description cannot be empty of None, but got {color_description}")
-
-    # Raw pattern
-    raw_pattern = raw_obj.raw_pattern
-    if isinstance(raw_pattern, list):
-        raw_pattern = np.array(raw_pattern)
-    if raw_pattern is None or raw_pattern.size == 0:
-        raise ValueError(f"Raw pattern cannot be None of empty, but got {raw_pattern}.")
-
-    # Exposure time
-    exposure_time = exif_data.get("ExposureTime")
-    if not exposure_time:
-        raise ValueError(f"Exposure time cannot be None or empty, but got {exposure_time}")
-
-    if isinstance(exposure_time, str):
-        if "/" in exposure_time:
-            numerator, denominator = exposure_time.split("/")
-            exposure_time = float(numerator) / float(denominator)
+    # Context Manager for safe RawPy handle management
+    with rawpy.imread(str(file_path)) as raw_obj:
+        # 1. Strict Black Level Handling
+        black_levels = exif.get("BlackLevel") or raw_obj.black_level_per_channel
+        if isinstance(black_levels, str):
+            black_levels = np.fromstring(black_levels, sep=" ")
+        elif isinstance(black_levels, (list, np.ndarray)):
+            black_levels = np.asarray(black_levels, dtype=np.float32)
         else:
+            raise TypeError(f"Unsupported BlackLevel type: {type(black_levels)}. Expected str, list, or ndarray.")
+
+        # 2. Strict Exposure Time Handling
+        exposure_time = exif.get("ExposureTime")
+        if exposure_time is None:
+            raise ValueError("Provided exposure time is None")
+        if isinstance(exposure_time, str):
+            if not exposure_time.strip():
+                raise ValueError("Provided exposure time is an empty string")
+            if "/" in exposure_time:
+                try:
+                    num, den = exposure_time.split("/")
+                    exposure_time = float(num) / float(den)
+                except (ValueError, ZeroDivisionError) as e:
+                    raise ValueError(f"Invalid exposure time fraction '{exposure_time}': {e}") from e
+            else:
+                exposure_time = float(exposure_time)
+        elif isinstance(exposure_time, (int, float)):
             exposure_time = float(exposure_time)
-    else:
-        raise ValueError(f"Exposure time expected to be of type str, but got {type(exposure_time)}")
+        else:
+            raise TypeError(f"Unsupported ExposureTime type: {type(exposure_time)}. Expected str, int, or float.")
 
-    # ISO
-    iso = exif_data.get("ISO")
-    if iso is None:
-        raise ValueError("Cannot be None")
-    # TODO (andrei aksionau): assert that it is int, if it's not and it's a string - parse it, check
-    #    it's greater than 0
-    # TODO (andrei aksionau): if anything of this fails - default to 100
+        # 3. ISO Handling
+        iso_val = exif.get("ISO")
+        if iso_val is None:
+            logger.warning(f"ISO missing for {file_path.name}. Defaulting to 100.")
+            iso = 100
+        else:
+            try:
+                iso = int(iso_val)
+                if iso <= 0:
+                    raise ValueError
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid/Non-positive ISO '{iso_val}' for {file_path.name}. Defaulting to 100.")
+                iso = 100
 
-    # CFA plane color
-    cfa_plane_color = exif_data.get("CFAPlaneColor")
-    if cfa_plane_color is not None and cfa_plane_color != "Red,Green,Blue":
-        raise ValueError(f"The code expects that the matrix layout is Red Green Blue, but got {cfa_plane_color}")
+        # 4. Noise Profile
+        noise_raw = exif.get("NoiseProfile")
+        noise_profile = None
+        if noise_raw is not None:
+            if isinstance(noise_raw, str):
+                noise_profile = np.fromstring(noise_raw, sep=" ")
+            elif isinstance(noise_raw, (list, np.ndarray)):
+                noise_profile = np.asarray(noise_raw, dtype=np.float32)
+            else:
+                raise TypeError(f"Unsupported NoiseProfile type: {type(noise_raw)}")
 
-    # Noise profile
-    noise_profile = exif_data.get("NoiseProfile")
-    if noise_profile is not None and isinstance(noise_profile, str):
-        noise_profile = np.fromstring(noise_profile, sep=" ")
-    if noise_profile is not None and noise_profile.size != 6:
-        raise ValueError(f"Needs to be 6 values in a noise profile but got {noise_profile.size}")
+        color_desc = raw_obj.color_desc
+        if isinstance(color_desc, bytes):
+            color_desc = color_desc.decode()
 
-    # Model name
-    camera_model_name = exif_data.get("Model", "Unknown")
-
-    raw_obj.close()
-
-    return Metadata(
-        file_path=file_path,
-        image_width=image_width,
-        image_height=image_height,
-        black_levels=black_levels,
-        white_level=white_level,
-        color_description=color_description,
-        raw_pattern=raw_pattern,
-        exposure_time=exposure_time,
-        iso=iso,
-        cfa_plane_color=cfa_plane_color,
-        noise_profile=noise_profile,
-        camera_model_name=camera_model_name,
-    )
+        return Metadata(
+            file_path=file_path,
+            image_width=int(exif.get("ImageWidth") or raw_obj.sizes.width),
+            image_height=int(exif.get("ImageHeight") or raw_obj.sizes.height),
+            black_levels=black_levels,
+            white_level=int(exif.get("WhiteLevel") or raw_obj.white_level),
+            color_description=color_desc,
+            raw_pattern=np.asarray(raw_obj.raw_pattern),
+            exposure_time=exposure_time,
+            iso=iso,
+            camera_model_name=str(exif.get("Model", "Unknown")),
+            cfa_plane_color=exif.get("CFAPlaneColor"),
+            noise_profile=noise_profile,
+        )

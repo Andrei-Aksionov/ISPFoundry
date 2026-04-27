@@ -49,7 +49,7 @@ def sample_metadata():
 
 class TestRetrieveBlackLevels:
     def test_estimate_from_cfa_minima(self, sample_raw_image, sample_metadata):
-        metadata = replace(sample_metadata, black_levels=None)
+        metadata = replace(sample_metadata, black_levels=np.zeros(4))
         black_levels = retrieve_black_levels(sample_raw_image, metadata)
         # For RGGB: R min=100, Gr min=110, Gb min=140, B min=150
         expected = np.array([100, 110, 140, 150], dtype=np.float32)
