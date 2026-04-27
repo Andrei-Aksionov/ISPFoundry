@@ -22,7 +22,7 @@ jobs:
       - name: Workflow Disabled
         run: |
           echo "Reason: This workflow is temporarily disabled to save CI minutes"
-          exit 1  # This force-fails the step and stops the workflow
+          exit 0  # This force-fails the step and stops the workflow
 
         # Installing ExifTool
       - name: Install system dependencies (Ubuntu)
