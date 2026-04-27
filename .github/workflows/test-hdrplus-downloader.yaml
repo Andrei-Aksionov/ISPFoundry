@@ -19,6 +19,11 @@ jobs:
         python-version: ['3.13']
 
     steps:
+      - name: Set up gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: 'gsutil'
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -32,11 +37,6 @@ jobs:
 
       - name: Install Python dependencies via uv sync
         run: uv sync
-
-      - name: Set up gcloud CLI
-        uses: google-github-actions/setup-gcloud@v2
-        with:
-          install_components: 'gsutil'
 
       - name: Running tests
         run: uv run pytest tests/test_dataset_downloader.py -s

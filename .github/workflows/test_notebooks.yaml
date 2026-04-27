@@ -19,6 +19,25 @@ jobs:
         python-version: ['3.13']
 
     steps:
+        # Installing ExifTool
+      - name: Install system dependencies (Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y exiftool
+
+      - name: Install system dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: choco install exiftool
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install exiftool
+
+      # GSUtil
+      - name: Set up gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: 'gsutil'
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -32,19 +51,6 @@ jobs:
 
       - name: Install Python dependencies via uv sync
         run: uv sync
-
-      # Installing ExifTool
-      - name: Install system dependencies (Ubuntu)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y exiftool
-
-      - name: Install system dependencies (Windows)
-        if: runner.os == 'Windows'
-        run: choco install exiftool
-
-      - name: Install system dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: brew install exiftool
 
       - name: Running tests
         run: uv run pytest tests/test_notebooks.py -vs
