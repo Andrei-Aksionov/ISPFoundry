@@ -317,6 +317,8 @@ def extract_metadata(file_path: Path) -> Metadata:
         if isinstance(color_desc, bytes):
             color_desc = color_desc.decode()
 
+        camera_model_name = f"{exif.get('Make', 'Unknown make')} {exif.get('Model', 'Unknown model')}"
+
         return Metadata(
             file_path=file_path,
             image_width=int(exif.get("ImageWidth") or raw_obj.sizes.width),
@@ -327,7 +329,7 @@ def extract_metadata(file_path: Path) -> Metadata:
             raw_pattern=np.asarray(raw_obj.raw_pattern),
             exposure_time=exposure_time,
             iso=iso,
-            camera_model_name=str(exif.get("Model", "Unknown")),
+            camera_model_name=camera_model_name,
             cfa_plane_color=exif.get("CFAPlaneColor"),
             noise_profile=noise_profile,
         )
