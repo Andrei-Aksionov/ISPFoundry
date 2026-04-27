@@ -93,7 +93,7 @@ def get_photometric_scalers(metadata: list[Metadata]) -> np.ndarray:
     Args:
         metadata: A list of Metadata classes for each frame in the burst.
             Each class must contain:
-            - `exposure_time`: float, int, or fractional string (e.g., "1/100").
+            - `exposure_time`: float value.
             - `iso`: numeric gain value.
 
     Returns:

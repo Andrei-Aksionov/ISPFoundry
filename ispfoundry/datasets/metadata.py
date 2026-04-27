@@ -132,10 +132,3 @@ def extract_metadata(file_path: Path) -> Metadata:  # noqa: D103
         noise_profile=noise_profile,
         camera_model_name=camera_model_name,
     )
-
-
-if __name__ == "__main__":
-    path = Path(
-        "/Users/andreiaksionau/Developer/Computational_Photography/ISPFoundry/data/raw/hdrplus_dataset/0006_20160722_115157_431"
-    )
-    extract_metadata(path)
