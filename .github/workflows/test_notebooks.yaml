@@ -1,12 +1,17 @@
-name: General Tests
+name: Test notebooks
 on:
   push:
     branches: [main]
+    paths: &shared_paths
+      - tests/test_notebooks.py
+      - notebooks/
+      - .github/workflows/test-notebooks.yaml
   pull_request:
     branches: [main]
+    paths: *shared_paths
 
 jobs:
-  general_tests:
+  test_notebooks:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -29,6 +34,4 @@ jobs:
         run: uv sync
 
       - name: Running tests
-        run: uv run pytest tests/ \
-          --ignore=tests/test_dataset_downloader.py \
-          --ignore=tests/test_notebooks.py
+        run: uv run pytest tests/test_notebooks.py -vs
