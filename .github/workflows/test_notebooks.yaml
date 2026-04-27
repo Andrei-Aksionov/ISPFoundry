@@ -15,6 +15,7 @@ jobs:
     # --- KILL SWITCH ---
     if: false  # Set this to 'true' when the project is finished
     # -----------------------------
+    name: ${{ matrix.os }} (Py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
