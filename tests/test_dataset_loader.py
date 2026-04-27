@@ -43,48 +43,13 @@ class TestDatasetLoader:
         assert images.dtype == np.float32
         assert images[0, 0, 0] == 10.0
 
-    @patch("ispfoundry.datasets.dataset_loader.get_exif_metadata")
-    @patch("rawpy.imread")
-    def test_get_metadata_conditional_fill(self, mock_rawpy, mock_exif, mock_folder):
-        """Tests that black/white levels are only added if missing."""
-        # 1. Mock EXIF data: first image has levels, second is missing them
-        mock_exif.return_value = [
-            {
-                "black_level": [1, 1, 1, 1],
-                "white_level": 255,
-            },
-            {
-                "some_other_key": "val",
-            },
-        ]
-
-        # 2. Mock rawpy data
-        mock_raw_obj = MagicMock()
-        mock_raw_obj.color_desc = b"RGBG"
-        mock_raw_obj.raw_pattern = [[0, 1], [1, 2]]
-        mock_raw_obj.black_level_per_channel = [50, 50, 50, 50]
-        mock_raw_obj.white_level = 1000
-        mock_rawpy.return_value.__enter__.return_value = mock_raw_obj
-
-        loader = DatasetLoader(mock_folder)
-        metadata = loader.get_metadata()
-
-        # Image 0: Should keep original EXIF values
-        assert metadata[0]["black_level"] == [1, 1, 1, 1]
-        assert metadata[0]["white_level"] == 255
-
-        # Image 1: Should pull from rawpy because they were missing
-        assert metadata[1]["black_level"] == [50, 50, 50, 50]
-        assert metadata[1]["white_level"] == 1000
-        assert metadata[1]["color_desc"] == "RGBG"
-
     @patch("rawpy.imread")
     @patch("tifffile.imread")
-    @patch("ispfoundry.datasets.dataset_loader.get_exif_metadata")
-    def test_load_data_integration(self, mock_exif, mock_tiff, mock_rawpy, mock_folder):
+    @patch("ispfoundry.datasets.dataset_loader.extract_metadata")
+    def test_load_data_integration(self, mock_metadata, mock_tiff, mock_rawpy, mock_folder):
         """Tests that load_data populates all class attributes."""
         # Minimal mocks to allow the calls to succeed
-        mock_exif.return_value = [{}, {}]
+        mock_metadata.return_value = [{}, {}]
         mock_rawpy.return_value.__enter__.return_value = MagicMock()
         mock_tiff.return_value = np.zeros((2, 2))
 

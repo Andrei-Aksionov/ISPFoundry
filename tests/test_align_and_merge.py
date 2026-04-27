@@ -1,9 +1,12 @@
+from dataclasses import replace
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
 import pytest
 from scipy.ndimage import gaussian_filter
 
+from ispfoundry.datasets import Metadata
 from ispfoundry.pipeline_steps.align_and_merge import (
     compute_tile_sad,
     downsample_luma_proxy,
@@ -22,93 +25,103 @@ from ispfoundry.pipeline_steps.align_and_merge import (
     sample_raw_bilinear,
 )
 
+
+@pytest.fixture
+def sample_metadata():
+    """Fixture for sample metadata."""
+    return Metadata(
+        file_path=Path("test_file_path"),
+        image_width=2,
+        image_height=2,
+        black_levels=np.array([50, 60, 70, 80]),  # R, Gr, Gb, B
+        white_level=1000,
+        color_description="RGBG",  # R=index0, G=index1, B=index2, G=index3
+        raw_pattern=np.array([[0, 1], [3, 2]]),  # Standard RGGB
+        exposure_time=0.1,
+        iso=100,
+        cfa_plane_color="Red,Green,Blue",
+        # 3 pairs of (Scale, Offset): R=(0.01, 0.001), G=(0.02, 0.002), B=(0.03, 0.003)
+        noise_profile=np.array([0.01, 0.001, 0.02, 0.002, 0.03, 0.003]),
+        camera_model_name="test_camera",
+    )
+
+
 # --------------------------------- Luma Proxy & Exposure Functions ----------------------------------
 
 
 class TestGetLumaProxy:
-    def test_get_luma_proxy_dimensions(self):
+    def test_get_luma_proxy_dimensions(self, sample_metadata):
         """Test that the function handles odd dimensions correctly using & ~1."""
         # Create a 5x5 image (odd dimensions)
         raw_image = np.ones((5, 5), dtype=np.uint16)
-        metadata = {
-            "color_desc": "RGBG",
-            "raw_pattern": [[0, 1], [3, 2]],  # Standard RGGB
-        }
-
-        proxy = get_luma_proxy(raw_image, metadata)
+        proxy = get_luma_proxy(raw_image, sample_metadata)
 
         # Expected output should be (5//2, 5//2) -> (2, 2)
         assert proxy.shape == (2, 2)
 
-    def test_get_luma_proxy_math_rggb(self):
+    def test_get_luma_proxy_math_rggb(self, sample_metadata):
         """Test a 2x2 block with known values to verify weights are applied correctly."""
         # RGGB Pattern: R=100, Gr=200, Gb=300, B=400
         raw_image = np.array([[100, 200], [300, 400]], dtype=np.uint16)
-
-        metadata = {
-            "color_desc": "RGBG",  # R=index0, G=index1, B=index2, G=index3
-            "raw_pattern": [[0, 1], [3, 2]],  # R, Gr, Gb, B
-        }
 
         # Calculation: (100 * 0.15) + (200 * 0.35) + (300 * 0.35) + (400 * 0.15)  # noqa: ERA001
         # 15 + 70 + 105 + 60 = 250
         expected_value = 250.0
 
-        proxy = get_luma_proxy(raw_image, metadata)
+        proxy = get_luma_proxy(raw_image, sample_metadata)
         np.testing.assert_allclose(proxy[0, 0], expected_value)
 
-    def test_get_luma_proxy_bayer_invariance(self):
+    def test_get_luma_proxy_bayer_invariance(self, sample_metadata):
         """Test that different Bayer patterns (BGGR vs RGGB) yield different (correct) results."""
         # Raw block
         raw_image = np.array([[100, 0], [0, 0]], dtype=np.uint16)
 
         # Case 1: Top-left is Red (Weight 0.15)
-        meta_rggb = {"color_desc": "RGBG", "raw_pattern": [[0, 1], [3, 2]]}
-        proxy_r = get_luma_proxy(raw_image, meta_rggb)
+        metadata_rggb = replace(
+            sample_metadata,
+            color_description="RGBG",  # R=index0, G=index1, B=index2, G=index3
+            raw_pattern=np.array([[0, 1], [3, 2]]),  # R, Gr, Gb, B
+        )
+        proxy_r = get_luma_proxy(raw_image, metadata_rggb)
 
         # Case 2: Top-left is Green (Weight 0.35)
         # We simulate this by changing the pattern so index 0 is Green
-        meta_grbg = {"color_desc": "GRBG", "raw_pattern": [[0, 1], [3, 2]]}
-        proxy_g = get_luma_proxy(raw_image, meta_grbg)
+        metadata_grbg = replace(
+            sample_metadata,
+            color_description="GRBG",  # R=index0, G=index1, B=index2, G=index3
+            raw_pattern=np.array([[0, 1], [3, 2]]),  # R, Gr, Gb, B
+        )
+        proxy_g = get_luma_proxy(raw_image, metadata_grbg)
 
         assert proxy_r[0, 0] == 15.0
         assert proxy_g[0, 0] == 35.0
 
-    def test_get_luma_proxy_output_type(self):
+    def test_get_luma_proxy_output_type(self, sample_metadata):
         """Ensure the output is always float32 as specified."""
         raw_image = np.zeros((10, 10), dtype=np.uint16)
-        metadata = {"color_desc": "RGBG", "raw_pattern": [[0, 1], [3, 2]]}
-
-        proxy = get_luma_proxy(raw_image, metadata)
+        proxy = get_luma_proxy(raw_image, sample_metadata)
         assert proxy.dtype == np.float32
 
-    def test_get_luma_proxy_normalization(self):
+    def test_get_luma_proxy_normalization(self, sample_metadata):
         """Verify that a pure white 2x2 quad results in 1.0 (unit energy conservation)."""
         raw_image = np.ones((2, 2), dtype=np.float32)
-        metadata = {
-            "color_desc": "RGBG",
-            "raw_pattern": [[0, 1], [3, 2]],  # RGGB
-        }
-
-        proxy = get_luma_proxy(raw_image, metadata)
+        proxy = get_luma_proxy(raw_image, sample_metadata)
 
         # 0.15(R) + 0.35(G) + 0.35(G) + 0.15(B) = 1.0
         np.testing.assert_allclose(proxy[0, 0], 1.0)
 
-    def test_get_luma_proxy_large_burst(self):
+    def test_get_luma_proxy_large_burst(self, sample_metadata):
         """Test with a larger synthetic image to ensure einsum scales correctly."""
         raw_image = np.random.rand(128, 128).astype(np.float32)
-        metadata = {"color_desc": "RGBG", "raw_pattern": [[0, 1], [3, 2]]}
-
-        proxy = get_luma_proxy(raw_image, metadata)
+        proxy = get_luma_proxy(raw_image, sample_metadata)
         assert proxy.shape == (64, 64)
         assert not np.any(np.isnan(proxy))
 
-    def test_invalid_color_desc(self):
+    def test_invalid_color_desc(self, sample_metadata):
         """Ensure it raises KeyError if a color in pattern isn't in color_weights."""
         raw_image = np.zeros((2, 2), dtype=np.float32)
         # 'X' is not in color_weights dict
-        metadata = {"color_desc": "RGBX", "raw_pattern": [[0, 1], [3, 2]]}
+        metadata = replace(sample_metadata, color_description="RGBX")
 
         with pytest.raises(KeyError):
             get_luma_proxy(raw_image, metadata)
@@ -174,13 +187,12 @@ class TestDownsampleLumaProxy:
 
 
 class TestGetExposureScalers:
-    # TODO (andrei aksionau): add a test with different ISOs
-    def test_scalers_math_simple(self):
+    def test_scalers_math(self, sample_metadata):
         """Verify that a 4x longer exposure results in a 0.25 scaler."""
         metadata = [
-            {"ExposureTime": 0.01},  # Shortest (Reference)
-            {"ExposureTime": 0.04},  # 4x longer
-            {"ExposureTime": 0.02},  # 2x longer
+            replace(sample_metadata, exposure_time=0.01),  # Shortest (Reference)
+            replace(sample_metadata, exposure_time=0.04),  # 4x longer
+            replace(sample_metadata, exposure_time=0.02),  # 2x longer
         ]
 
         expected = np.array([1.0, 0.25, 0.5], dtype=np.float32)
@@ -188,38 +200,11 @@ class TestGetExposureScalers:
 
         np.testing.assert_allclose(result, expected, rtol=1e-6, atol=1e-6)
 
-    def test_fractional_string_parsing(self):
-        """Verify that '1/100' style strings are parsed and scaled correctly."""
+    def test_different_exposures_and_same_iso(self, sample_metadata):
         metadata = [
-            {"ExposureTime": "1/100"},  # 0.01
-            {"ExposureTime": "1/50"},  # 0.02
-            {"ExposureTime": "1/400"},  # 0.0025 (Shortest Reference)
-        ]
-
-        # Calculation -> (1/400) / (1/100) = 0.25
-        expected = np.array([0.25, 0.125, 1.0], dtype=np.float32)
-        result = get_photometric_scalers(metadata)
-
-        np.testing.assert_allclose(result, expected, rtol=1e-6, atol=1e-6)
-
-    def test_mixed_types_scaling(self):
-        """Ensure integers, floats, and strings are handled in a single burst."""
-        metadata = [
-            {"ExposureTime": 1},  # Integer
-            {"ExposureTime": 0.5},  # Float (Shortest)
-            {"ExposureTime": "2/1"},  # String
-        ]
-
-        expected = np.array([0.5, 1.0, 0.25], dtype=np.float32)
-        result = get_photometric_scalers(metadata)
-
-        np.testing.assert_allclose(result, expected, rtol=1e-6, atol=1e-6)
-
-    def test_different_exposures_and_same_iso(self):
-        metadata = [
-            {"ExposureTime": "1/100", "ISO": 100},
-            {"ExposureTime": "1/50", "ISO": 100},
-            {"ExposureTime": "1/400", "ISO": 100},
+            replace(sample_metadata, exposure_time=0.01, iso=100),  # 4x longer
+            replace(sample_metadata, exposure_time=0.02, iso=100),  # 8x longer
+            replace(sample_metadata, exposure_time=0.0025, iso=100),  # Shortest frame (Reference)
         ]
 
         expected = np.array([0.25, 0.125, 1.0], dtype=np.float32)
@@ -227,16 +212,16 @@ class TestGetExposureScalers:
 
         np.testing.assert_allclose(result, expected, rtol=1e-6, atol=1e-6)
 
-    def test_different_exposures_and_different_iso(self):
+    def test_different_exposures_and_different_iso(self, sample_metadata):
         metadata = [
             # These 3 should have the same brightness
-            {"ExposureTime": "1/50", "ISO": 100},  # 8x brighter
-            {"ExposureTime": "1/100", "ISO": 200},  # 8x brighter
-            {"ExposureTime": "1/400", "ISO": 800},  # 8x brighter
+            replace(sample_metadata, exposure_time=0.02, iso=100),  # 8x brighter
+            replace(sample_metadata, exposure_time=0.01, iso=200),  # 8x brighter
+            replace(sample_metadata, exposure_time=0.0025, iso=800),  # 8x brighter
             # These 3 should have different brightness
-            {"ExposureTime": "1/50", "ISO": 400},  # 32x brighter
-            {"ExposureTime": "1/100", "ISO": 100},  # 4x brighter
-            {"ExposureTime": "1/400", "ISO": 100},  # 1x
+            replace(sample_metadata, exposure_time=0.02, iso=400),  # 32x brighter
+            replace(sample_metadata, exposure_time=0.01, iso=100),  # 4x brighter
+            replace(sample_metadata, exposure_time=0.0025, iso=100),  # 1x brighter
         ]
 
         expected = np.array([0.125, 0.125, 0.125, 0.03125, 0.25, 1.0], dtype=np.float32)
@@ -244,38 +229,30 @@ class TestGetExposureScalers:
 
         np.testing.assert_allclose(result, expected, rtol=1e-6, atol=1e-6)
 
-    def test_identical_exposures_uniformity(self):
+    def test_identical_exposures_uniformity(self, sample_metadata):
         """All scalers must be 1.0 when exposure times are identical."""
-        metadata = [{"ExposureTime": 0.0333}] * 3
+        metadata = [replace(sample_metadata, exposure_time=0.0333) for _ in range(3)]
         result = get_photometric_scalers(metadata)
 
         expected = np.ones(3, dtype=np.float32)
         np.testing.assert_allclose(result, expected, rtol=1e-6, atol=1e-6)
 
-    def test_output_metadata_consistency(self):
+    def test_output_metadata_consistency(self, sample_metadata):
         """Verify output array properties: length, type, and min value."""
-        metadata = [{"ExposureTime": 0.1}, {"ExposureTime": 0.5}, {"ExposureTime": 0.2}]
+        metadata = [
+            replace(sample_metadata, exposure_time=0.1),
+            replace(sample_metadata, exposure_time=0.5),
+            replace(sample_metadata, exposure_time=0.2),
+        ]
         result = get_photometric_scalers(metadata)
 
         assert result.dtype == np.float32
         assert result.shape == (3,)
         assert np.max(result) == 1.0  # Shortest must be 1.0
 
-    def test_parsing_error_on_invalid_string(self):
-        """Ensure the function raises a ValueError for un-parsable ExposureTime."""
-        metadata = [{"ExposureTime": "not_a_number"}]
-        with pytest.raises(ValueError, match="convert string to float"):
-            get_photometric_scalers(metadata)
-
 
 class TestFindSharpestImageIdx:
-    @pytest.fixture
-    def base_metadata(self):
-        # We now include the required 'ExposureTime' key
-        # 'color_desc' and 'raw_pattern' are needed by get_luma_proxy
-        return {"color_desc": "RGBG", "raw_pattern": [[0, 1], [3, 2]], "ISO": 100, "ExposureTime": "1/1000"}
-
-    def test_selects_sharpest_within_short_exposure_group(self, base_metadata):
+    def test_selects_sharpest_within_short_exposure_group(self, sample_metadata):
         """Test that the sharpest image is chosen among frames with the same short exposure."""
         sharp = np.zeros((32, 32), dtype=np.uint16)
         row, col = np.indices(sharp.shape)
@@ -286,28 +263,28 @@ class TestFindSharpestImageIdx:
 
         images = np.stack([blurry, sharp])
         # Both are "short" exposures
-        metadata = [base_metadata.copy() for _ in range(2)]
+        metadata = [replace(sample_metadata) for _ in range(2)]
 
         best_idx = find_sharpest_image_idx(images, metadata)
         assert best_idx == 1
 
-    def test_prefers_short_exposure_over_sharp_long_exposure(self, base_metadata):
+    def test_prefers_short_exposure_over_sharp_long_exposure(self, sample_metadata):
         """Test that the logic correctly excludes long exposures from selection, even if the long exposure appears 'sharper' due to higher signal/contrast."""
         # 1. Create a "Long Exposure" image: very sharp, high contrast
         long_exp_img = np.zeros((32, 32), dtype=np.float32)
         row, col = np.indices(long_exp_img.shape)
         mask = (row // 8 + col // 8) % 2 == 0
         long_exp_img[mask] = 1.0  # High signal
-        long_metadata = base_metadata.copy()
-        long_metadata["ExposureTime"] = "1/250"  # 4x longer than base
+        long_metadata = replace(sample_metadata)
+        long_metadata.exposure_time = 0.004  # 4x longer than base
 
         # 2. Create a "Short Exposure" image: slightly blurry, lower contrast
         # In a real burst, this might happen due to slight hand shake
         short_exp_img = np.zeros((32, 32), dtype=np.float32)
         short_exp_img[mask] = 0.7  # Lower signal
         short_exp_img = gaussian_filter(short_exp_img.astype(float), sigma=0.8).astype(np.float32)
-        short_metadata = base_metadata.copy()
-        short_metadata["ExposureTime"] = "1/1000"
+        short_metadata = replace(sample_metadata)
+        short_metadata.exposure_time = 0.001
 
         # Even though index 0 (long) is mathematically "sharper" (higher variance),
         # index 1 (short) MUST be selected to avoid clipped highlights.
@@ -317,7 +294,7 @@ class TestFindSharpestImageIdx:
         best_idx = find_sharpest_image_idx(images, metadata)
         assert best_idx == 1
 
-    def test_noise_robustness(self, base_metadata):
+    def test_noise_robustness(self, sample_metadata):
         """Test that Gaussian smoothing prevents sensor noise from being mistaken for sharpness."""
         # Pure noise
         noisy = np.random.uniform(0.4, 0.6, (32, 32)).astype(np.float32)
@@ -327,43 +304,26 @@ class TestFindSharpestImageIdx:
         structural[:16, :] = 0.8
 
         images = np.stack([noisy, structural])
-        metadata = [base_metadata.copy() for _ in range(2)]
+        metadata = [replace(sample_metadata) for _ in range(2)]
 
         best_idx = find_sharpest_image_idx(images, metadata)
         assert best_idx == 1
 
-    def test_handles_mixed_string_and_float_exposure(self, base_metadata):
-        """Ensure the parser handles both fractional strings and floats in metadata."""
-        img = np.full((32, 32), 0.5, dtype=np.float32)
-
-        m1 = base_metadata.copy()
-        m1["ExposureTime"] = "1/500"
-
-        m2 = base_metadata.copy()
-        m2["ExposureTime"] = 0.002  # Equivalent to 1/500
-
-        images = np.stack([img, img])
-        metadata = [m1, m2]
-
-        # Both are considered "short" (minimum), should default to first index if identical
-        best_idx = find_sharpest_image_idx(images, metadata)
-        assert best_idx == 0
-
-    def test_fallback_when_no_short_exposures_found(self, base_metadata):
+    def test_fallback_when_no_short_exposures_found(self, sample_metadata):
         """Ensure the function returns a valid index from the whole burst even if exposure_scalers logic fails or metadata is uniform."""
         # Create two identical images
         img = np.random.rand(32, 32).astype(np.float32)
         images = np.stack([img, img])
 
         # Metadata with same exposure (all will be 'short' by definition, but we test the logic's ability to handle the list)
-        metadata = [base_metadata.copy() for _ in range(2)]
+        metadata = [replace(sample_metadata) for _ in range(2)]
 
         best_idx = find_sharpest_image_idx(images, metadata)
 
         assert best_idx in [0, 1]
         assert isinstance(best_idx, (int, np.integer))
 
-    def test_sharpness_with_normalized_floats(self, base_metadata):
+    def test_sharpness_with_normalized_floats(self, sample_metadata):
         """Verify the function works with [0, 1] float32 images as specified in the ISP pipeline requirements."""
         # Create a sharp edge in [0, 1] range
         sharp_img = np.zeros((32, 32), dtype=np.float32)
@@ -373,28 +333,28 @@ class TestFindSharpestImageIdx:
         blurry_img = gaussian_filter(sharp_img, sigma=2.0)
 
         images = np.stack([blurry_img, sharp_img])
-        metadata = [base_metadata.copy() for _ in range(2)]
+        metadata = [replace(sample_metadata) for _ in range(2)]
 
         best_idx = find_sharpest_image_idx(images, metadata)
 
         # Index 1 should be significantly sharper (higher Laplacian variance)
         assert best_idx == 1
 
-    def test_all_black_images(self, base_metadata):
+    def test_all_black_images(self, sample_metadata):
         """Edge case: If images are completely black (underexposed), the function should still return an index rather than crashing."""
         black_img = np.zeros((32, 32), dtype=np.float32)
         images = np.stack([black_img, black_img])
-        metadata = [base_metadata.copy() for _ in range(2)]
+        metadata = [replace(sample_metadata) for _ in range(2)]
 
         # Should not raise ZeroDivisionError or similar
         best_idx = find_sharpest_image_idx(images, metadata)
         assert best_idx == 0
 
-    def test_single_image_burst(self, base_metadata):
+    def test_single_image_burst(self, sample_metadata):
         """Verify behavior with a burst of size 1."""
         img = np.random.rand(32, 32).astype(np.float32)
         images = img[None, ...]
-        metadata = [base_metadata]
+        metadata = [sample_metadata]
 
         best_idx = find_sharpest_image_idx(images, metadata)
         assert best_idx == 0
@@ -404,16 +364,6 @@ class TestFindSharpestImageIdx:
 
 
 class TestGetNoiseProfile:
-    @pytest.fixture
-    def sample_metadata(self):
-        return {
-            "CFAPlaneColor": "Red,Green,Blue",
-            # 3 pairs of (Scale, Offset): R=(0.01, 0.001), G=(0.02, 0.002), B=(0.03, 0.003)
-            "NoiseProfile": "0.01 0.001 0.02 0.002 0.03 0.003",
-            "color_desc": "RGBG",
-            "raw_pattern": [[0, 1], [3, 2]],  # RGGB: 0=R, 1=G, 3=G, 2=B
-        }
-
     def test_parse_dng_noise_profile_mapping(self, sample_metadata):
         """Verify that NoiseProfile string is correctly mapped to the 2x2 Bayer grid."""
         image = np.zeros((10, 10), dtype=np.float32)
@@ -435,7 +385,7 @@ class TestGetNoiseProfile:
         """Verify mapping works correctly for a different Bayer phase (e.g., BGGR)."""
         image = np.zeros((10, 10), dtype=np.float32)
         # Change pattern to BGGR: 2=B, 1=G, 3=G, 0=R
-        sample_metadata["raw_pattern"] = [[2, 1], [3, 0]]
+        sample_metadata.raw_pattern = [[2, 1], [3, 0]]
 
         scales, offsets = get_noise_profile(image, sample_metadata)
 
@@ -446,34 +396,18 @@ class TestGetNoiseProfile:
         np.testing.assert_allclose(scales, [[0.03, 0.02], [0.02, 0.01]])
         np.testing.assert_allclose(offsets, [[0.003, 0.002], [0.002, 0.001]])
 
-    def test_invalid_cfa_plane_color(self, sample_metadata):
-        """Ensure ValueError is raised if CFAPlaneColor is not Red,Green,Blue."""
-        sample_metadata["CFAPlaneColor"] = "Cyan,Magenta,Yellow"
-        image = np.zeros((4, 4))
-
-        with pytest.raises(ValueError, match="The code expects that the matrix layout is Red Green Blue"):
-            get_noise_profile(image, sample_metadata)
-
     def test_fallback_to_estimation(self, sample_metadata):
         """Verify that estimate_noise_profile is called if NoiseProfile is missing."""
         # Remove NoiseProfile from metadata
-        del sample_metadata["NoiseProfile"]
+        metadata = replace(sample_metadata, noise_profile=None)
         image = np.random.rand(10, 10).astype(np.float32)
 
         # Mocking the estimation function to verify it's reached
         with patch("ispfoundry.pipeline_steps.align_and_merge.estimate_noise_profile") as mock_estimate:
             mock_estimate.return_value = (np.ones((2, 2)), np.zeros((2, 2)))
 
-            get_noise_profile(image, sample_metadata)
+            get_noise_profile(image, metadata)
             mock_estimate.assert_called_once_with(image)
-
-    def test_malformed_noise_profile_string(self, sample_metadata):
-        """Ensure it raises an error if the NoiseProfile string is incomplete."""
-        sample_metadata["NoiseProfile"] = "0.01 0.001"  # Only 2 values instead of 6
-        image = np.zeros((4, 4))
-
-        with pytest.raises(IndexError):
-            get_noise_profile(image, sample_metadata)
 
 
 class TestEstimateNoiseProfile:
@@ -1401,10 +1335,23 @@ class TestMergeImages:
 
     @pytest.fixture
     def mock_metadata(self):
-        return [
-            {"ExposureTime": 0.01, "ISO": 100, "BlackLevel": 0, "color_desc": "RGBG", "raw_pattern": [[2, 3], [1, 0]]},
-            {"ExposureTime": 0.01, "ISO": 100, "BlackLevel": 0, "color_desc": "RGBG", "raw_pattern": [[2, 3], [1, 0]]},
-        ]
+        mtd = Metadata(
+            file_path=Path("test_file_path"),
+            image_width=2,
+            image_height=2,
+            black_levels=np.array([50, 60, 70, 80]),  # R, Gr, Gb, B
+            white_level=1000,
+            color_description="RGBG",  # R=index0, G=index1, B=index2, G=index3
+            raw_pattern=np.array([[0, 1], [3, 2]]),  # Standard RGGB
+            exposure_time=0.1,
+            iso=100,
+            cfa_plane_color="Red,Green,Blue",
+            # 3 pairs of (Scale, Offset): R=(0.01, 0.001), G=(0.02, 0.002), B=(0.03, 0.003)
+            noise_profile=np.array([0.01, 0.001, 0.02, 0.002, 0.03, 0.003]),
+            camera_model_name="test_camera",
+        )
+
+        return [replace(mtd), replace(mtd)]
 
     def test_input_validation(self, mock_burst, mock_metadata):
         """Ensure the function catches bad inputs before starting the heavy lifting."""
@@ -1480,7 +1427,7 @@ class TestMergeImages:
         """Verify that higher ISO results in a larger (more trusting) k_adaptive."""
         # ISO 100 -> stops = 0 -> k = 1.0
         # ISO 400 -> stops = 2 -> k = 1.0 + 0.5*2 = 2.0
-        mock_metadata[0]["ISO"] = 400
+        mock_metadata[0].iso = 400
 
         with (
             patch("ispfoundry.pipeline_steps.align_and_merge._parallel_tile_processor") as mock_proc,
@@ -1496,7 +1443,7 @@ class TestMergeImages:
             passed_k = mock_proc.call_args.kwargs["k_adaptive"]
             assert passed_k == 2.0
 
-    def test_merge_no_motion_reduces_noise_vs_ground_truth(self):
+    def test_merge_no_motion_reduces_noise_vs_ground_truth(self, mock_metadata):
         """
         Verifies that merging a noisy burst reduces noise relative to the known ground-truth image.
         Uses a local generator for determinism and aligns noise generation with metadata.
@@ -1514,16 +1461,7 @@ class TestMergeImages:
         burst = [np.clip(base + rng.normal(0, noise_sigma, base.shape), 0, 1).astype(np.float32) for _ in range(5)]
 
         # 4. Metadata (Aligned with generated noise)
-        metadata = [
-            {
-                "ExposureTime": "1/100",
-                "ISO": 100,
-                "color_desc": ["R", "G", "G", "B"],
-                "raw_pattern": [[0, 1], [2, 3]],
-                "NoiseProfile": "0.01 0.0001 0.01 0.0001 0.01 0.0001",
-                "CFAPlaneColor": "Red,Green,Blue",
-            }
-        ] * len(burst)
+        metadata = [replace(mock_metadata[0]) for _ in range(len(burst))]
 
         # 5. Execute Merge
         merged = merge_images(burst, metadata)
@@ -1539,7 +1477,7 @@ class TestMergeImages:
         # We allow a small epsilon for clipping effects, but it should be significantly lower.
         assert output_noise < input_noise
 
-    def test_merge_with_motion_reduces_noise(self):
+    def test_merge_with_motion_reduces_noise(self, mock_metadata):
         """
         Verifies that merging a noisy burst with motion (shifting) still reduces noise.
         This tests the pipeline's ability to either align or robustly handle pixel shifts.
@@ -1566,16 +1504,7 @@ class TestMergeImages:
             burst.append(np.clip(noisy_frame, 0, 1).astype(np.float32))
 
         # 4. Metadata (ISO 1600 to keep k_adaptive high enough for merge)
-        metadata = [
-            {
-                "ExposureTime": "1/100",
-                "ISO": 1600,
-                "color_desc": ["R", "G", "G", "B"],
-                "raw_pattern": [[0, 1], [2, 3]],
-                "NoiseProfile": "0.01 0.0001 0.01 0.0001 0.01 0.0001",
-                "CFAPlaneColor": "Red,Green,Blue",
-            }
-        ] * len(burst)
+        metadata = [replace(mock_metadata[0], iso=1_600) for _ in range(len(burst))]
 
         # 5. Execute Merge
         merged = merge_images(burst, metadata)
@@ -1594,7 +1523,7 @@ class TestMergeImages:
         # (because it defaults to the reference frame).
         assert output_noise < input_noise
 
-    def test_merge_images_no_motion_improves_snr(self):
+    def test_merge_images_no_motion_improves_snr(self, mock_metadata):
         """Verifies that merging improves signal-to-noise ratio (SNR) compared to individual noisy frames with bit-perfect determinism."""
 
         # Use a local generator for guaranteed determinism
@@ -1612,16 +1541,7 @@ class TestMergeImages:
 
         # 3. Metadata setup
         # Ensure NoiseProfile string matches the params used in generation
-        metadata = [
-            {
-                "ExposureTime": "1/100",
-                "ISO": 100,
-                "color_desc": ["R", "G", "G", "B"],
-                "raw_pattern": [[0, 1], [2, 3]],
-                "NoiseProfile": "0.01 0.0001 0.01 0.0001 0.01 0.0001",
-                "CFAPlaneColor": "Red,Green,Blue",
-            }
-        ] * 5
+        metadata = [replace(mock_metadata[0]) for _ in range(len(burst))]
 
         # 4. Process
         merged = merge_images(burst, metadata)
@@ -1639,7 +1559,7 @@ class TestMergeImages:
         # With 5 frames, we expect roughly sqrt(5) ≈ 2.2x improvement in a perfect world
         assert snr_out > snr_in
 
-    def test_merge_with_motion_improves_snr(self):
+    def test_merge_with_motion_improves_snr(self, mock_metadata):
         """
         Verifies that merging a noisy burst with motion (shifting) still reduces noise.
         This tests the pipeline's ability to either align or robustly handle pixel shifts.
@@ -1666,16 +1586,7 @@ class TestMergeImages:
             burst.append(np.clip(noisy_frame, 0, 1).astype(np.float32))
 
         # 4. Metadata (ISO 1600 to keep k_adaptive high enough for merge)
-        metadata = [
-            {
-                "ExposureTime": "1/100",
-                "ISO": 1600,
-                "color_desc": ["R", "G", "G", "B"],
-                "raw_pattern": [[0, 1], [2, 3]],
-                "NoiseProfile": "0.01 0.0001 0.01 0.0001 0.01 0.0001",
-                "CFAPlaneColor": "Red,Green,Blue",
-            }
-        ] * len(burst)
+        metadata = [replace(mock_metadata[0]) for _ in range(len(burst))]
 
         # 5. Execute Merge
         merged = merge_images(burst, metadata)
@@ -1693,7 +1604,7 @@ class TestMergeImages:
         # With 5 frames, we expect roughly sqrt(5) ≈ 2.2x improvement in a perfect world
         assert snr_out > snr_in
 
-    def test_merge_parallel_tile_processor_jit_no_jit_consistency(self):
+    def test_merge_parallel_tile_processor_jit_no_jit_consistency(self, mock_metadata):
         """Verifies that the Numba-accelerated (parallel) version and the pure Python version produce identical results."""
         # 1. Setup local RNG
         rng = np.random.default_rng(24)
@@ -1712,16 +1623,7 @@ class TestMergeImages:
             noisy_frame = shifted_base + rng.normal(0, noise_sigma, base.shape)
             burst.append(np.clip(noisy_frame, 0, 1).astype(np.float32))
 
-        metadata = [
-            {
-                "ExposureTime": "1/100",
-                "ISO": 1600,
-                "color_desc": "RGBG",  # Adjusted for typical metadata structure
-                "raw_pattern": [[0, 1], [3, 2]],
-                "NoiseProfile": "0.01 0.0001 0.01 0.0001 0.01 0.0001",
-                "CFAPlaneColor": "Red,Green,Blue",
-            }
-        ] * len(burst)
+        metadata = [replace(mock_metadata[0]) for _ in range(len(burst))]
 
         # --- 4. Verify Numba Configuration ---
         # We check the dispatcher for the parallel tile processor
@@ -1761,7 +1663,7 @@ class TestMergeImages:
             merged_numba, merged_python, atol=1e-7, err_msg="Numba parallel and Python results diverged!"
         )
 
-    def test_merge_parallel_tile_processor_verify_no_racing_condition(self):
+    def test_merge_parallel_tile_processor_verify_no_racing_condition(self, mock_metadata):
         """
         Stress tests the parallel implementation to catch race conditions.
         Runs the same merge multiple times and asserts bit-exact (or epsilon) identity.
@@ -1785,16 +1687,7 @@ class TestMergeImages:
             noise = rng.normal(0, 0.05, shape)
             burst.append(np.clip(frame + noise, 0, 1).astype(np.float32))
 
-        metadata = [
-            {
-                "ExposureTime": "1/100",
-                "ISO": 1600,
-                "color_desc": "RGBG",  # Adjusted for typical metadata structure
-                "raw_pattern": [[0, 1], [3, 2]],
-                "NoiseProfile": "0.01 0.0001 0.01 0.0001 0.01 0.0001",
-                "CFAPlaneColor": "Red,Green,Blue",
-            }
-        ] * len(burst)
+        metadata = [replace(mock_metadata[0]) for _ in range(len(burst))]
 
         # 3. Execution - Run multiple iterations
         # Race conditions are probabilistic; running 10+ times increases catch rate.

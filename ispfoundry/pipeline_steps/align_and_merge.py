@@ -1,5 +1,3 @@
-from typing import Any
-
 import numpy as np
 from loguru import logger
 from numba import njit, prange
@@ -8,11 +6,12 @@ from scipy.ndimage import convolve, gaussian_filter
 from tqdm import trange
 
 from ispfoundry import ISPStep, register_step
+from ispfoundry.datasets import Metadata
 
 # --------------------------------- Luma Proxy & Exposure Functions ----------------------------------
 
 
-def get_luma_proxy(raw_image: np.ndarray, metadata: dict[str, Any]) -> np.ndarray:
+def get_luma_proxy(raw_image: np.ndarray, metadata: Metadata) -> np.ndarray:
     """
     Converts a Bayer RAW image to a half-resolution grayscale proxy for alignment.
 
@@ -23,8 +22,8 @@ def get_luma_proxy(raw_image: np.ndarray, metadata: dict[str, Any]) -> np.ndarra
 
     Args:
         raw_image: Bayer RAW sensor data of shape (H, W).
-        metadata: Dictionary containing:
-            - 'color_desc': String describing the CFA colors (e.g., "RGBG").
+        metadata: Metadata class containing:
+            - 'color_description': String describing the CFA colors (e.g., "RGBG").
             - 'raw_pattern': 2x2 list/array mapping CFA indices to the physical pixel grid
 
     Returns:
@@ -41,8 +40,8 @@ def get_luma_proxy(raw_image: np.ndarray, metadata: dict[str, Any]) -> np.ndarra
     color_weights = {"R": 0.15, "G": 0.35, "Gr": 0.35, "Gb": 0.35, "B": 0.15}
 
     # 3. Build a 2x2 weight mask
-    desc = metadata["color_desc"]  # e.g., "RGBG"
-    pattern = metadata["raw_pattern"]  # e.g., [[2, 3], [1, 0]]
+    desc = metadata.color_description  # e.g., "RGBG"
+    pattern = metadata.raw_pattern  # e.g., [[2, 3], [1, 0]]
     # This creates a 2x2 array of weights, e.g., [[0.15, 0.35], [0.35, 0.15]]
     weights_map = np.array([[color_weights[desc[idx]] for idx in row] for row in pattern])
 
@@ -82,7 +81,7 @@ def downsample_luma_proxy(proxy: np.ndarray) -> np.ndarray:
     return proxy.reshape(height // 2, 2, width // 2, 2).mean(axis=(1, 3))
 
 
-def get_photometric_scalers(metadata: list[dict[str, Any]]) -> np.ndarray:
+def get_photometric_scalers(metadata: list[Metadata]) -> np.ndarray:
     """
     Calculates normalization factors based on total photometric exposure (Time * ISO).
 
@@ -92,10 +91,10 @@ def get_photometric_scalers(metadata: list[dict[str, Any]]) -> np.ndarray:
     enabling a consistent merge and providing a basis for SNR-aware weighting.
 
     Args:
-        metadata: A list of metadata dictionaries for each
-            frame in the burst. Each dictionary must contain:
-            - "ExposureTime": float, int, or fractional string (e.g., "1/100").
-            - "ISO": numeric gain value.
+        metadata: A list of Metadata classes for each frame in the burst.
+            Each class must contain:
+            - `exposure_time`: float value.
+            - `iso`: numeric gain value.
 
     Returns:
         A 1D float32 array of scalers, one for each frame.
@@ -110,15 +109,8 @@ def get_photometric_scalers(metadata: list[dict[str, Any]]) -> np.ndarray:
 
     """
 
-    # TODO (andrei aksionau): Upcoming Metadata class should do this parsing
-    def parse_expr(value: str) -> float:
-        if isinstance(value, str) and "/" in value:
-            numerator, denominator = value.split("/")
-            return float(numerator) / float(denominator)
-        return float(value)
-
     # Find the shortest exposure
-    exposures = np.array([parse_expr(mtd["ExposureTime"]) * mtd.get("ISO", 100) for mtd in metadata], dtype=np.float32)
+    exposures = np.array([mtd.exposure_time * mtd.iso for mtd in metadata], dtype=np.float32)
     ref_exposure = exposures.min()
 
     # Normalize other exposures
@@ -126,7 +118,7 @@ def get_photometric_scalers(metadata: list[dict[str, Any]]) -> np.ndarray:
     return (ref_exposure / exposures).astype(np.float32)
 
 
-def find_sharpest_image_idx(images: np.ndarray, metadata: list[dict[str, Any]]) -> int:
+def find_sharpest_image_idx(images: np.ndarray, metadata: list[Metadata]) -> int:
     """
     Selects the optimal reference frame from the burst using a 'Lucky Imaging' approach.
 
@@ -140,7 +132,7 @@ def find_sharpest_image_idx(images: np.ndarray, metadata: list[dict[str, Any]]) 
 
     Args:
         images: (N, H, W) 3D ndarray of Bayer RAW images in [0, 1] range.
-        metadata: List of metadata dicts containing 'ExposureTime' and CFA info.
+        metadata: List of Metadata classes containing 'exposure_time'.
 
     Returns:
         Index of the sharpest short-exposure frame.
@@ -182,7 +174,7 @@ def find_sharpest_image_idx(images: np.ndarray, metadata: list[dict[str, Any]]) 
 # ------------------------------------ Noise Estimation Functions ------------------------------------
 
 
-def get_noise_profile(image: np.ndarray, metadata: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+def get_noise_profile(image: np.ndarray, metadata: Metadata) -> tuple[np.ndarray, np.ndarray]:
     """
     Parses the NoiseProfile from metadata into 2x2 grids aligned with the Bayer pattern.
 
@@ -195,34 +187,24 @@ def get_noise_profile(image: np.ndarray, metadata: dict[str, Any]) -> tuple[np.n
 
     Args:
         image: A RAW image (2D numpy array).
-        metadata: A dictionary containing per-frame sensor information (e.g., exposure time, black level).
+        metadata: A Metadata class containing per-frame sensor information (e.g., exposure time, black level).
 
     Returns:
         Tuple containing:
             - scales_grid: A 2x2 float32 array of shot noise scales.
             - offsets_grid: A 2x2 float32 array of read noise offsets.
 
-    Raises:
-        ValueError: If the CFAPlaneColor does not match the expected "Red,Green,Blue"
-            sequence or if the NoiseProfile format is invalid.
-
     """
 
-    if "CFAPlaneColor" in metadata and metadata["CFAPlaneColor"] != "Red,Green,Blue":
-        raise ValueError(
-            f"The code expects that the matrix layout is Red Green Blue, but got {metadata['CFAPlaneColor']}"
-        )
-
     # Case A: Use DNG-standard NoiseProfile if available
-    if "NoiseProfile" in metadata:
-        noise_profile = [float(x) for x in metadata["NoiseProfile"].split()]
+    if metadata.noise_profile is not None:
         color_map = {}
         # NoiseProfile contains 6 values: 3 pairs of Scale and Offset for each color
         for idx, color_name in enumerate(("R", "G", "B")):
-            color_map[color_name] = (noise_profile[idx * 2], noise_profile[idx * 2 + 1])
+            color_map[color_name] = (metadata.noise_profile[idx * 2], metadata.noise_profile[idx * 2 + 1])
 
-        desc = metadata["color_desc"]  # e.g., "RGBG"
-        pattern = metadata["raw_pattern"]  # e.g., [[2, 3], [1, 0]]
+        desc = metadata.color_description  # e.g., "RGBG"
+        pattern = metadata.raw_pattern  # e.g., [[2, 3], [1, 0]]
 
         # Create 2x2 grids for G and C
         scales_grid = np.array([[color_map[desc[idx]][0] for idx in row] for row in pattern], dtype=np.float32)
@@ -231,9 +213,8 @@ def get_noise_profile(image: np.ndarray, metadata: dict[str, Any]) -> tuple[np.n
         return scales_grid, offsets_grid
 
     # Case B: Fallback to empirical estimation
-    logger.warning(
-        "NoiseProfile missing for %s. Estimating noise from reference frame." % metadata.get("Model", "Unknown")
-    )
+    logger.warning("NoiseProfile missing for %s. Estimating noise from reference frame." % metadata.camera_model_name)
+
     return estimate_noise_profile(image)
 
 
@@ -985,7 +966,7 @@ def _parallel_tile_processor(
 @register_step(ISPStep.ALIGN_AND_MERGE)
 def merge_images(
     burst_images: np.ndarray,
-    metadata: list[dict[str, Any]],
+    metadata: list[Metadata],
     tile_size: int = 32,
     max_search_radius: int = 32,
 ) -> np.ndarray:
@@ -999,7 +980,7 @@ def merge_images(
 
     Args:
         burst_images: A numpy array of shape (N, H, W) containing images from the burst.
-        metadata: A list of dictionaries containing per-frame sensor metadata (e.g.,
+        metadata: A list of Metadata classes containing per-frame sensor metadata (e.g.,
             exposure time, black level).
         tile_size: The width/height of the processing tile in full-resolution pixels.
             Must be a multiple of the downsampling factor (usually 2).
@@ -1020,10 +1001,8 @@ def merge_images(
     if len(burst_images) <= 1:
         raise ValueError(f"At least two images needed for Align&Merge, but got {len(burst_images)}.")
 
-    if not all(metadata[0]["ExposureTime"] == mtd["ExposureTime"] for mtd in metadata[1:]):
-        logger.info(
-            "The burst contains images with different exposures: %s." % [mtd["ExposureTime"] for mtd in metadata]
-        )
+    if not all(metadata[0].exposure_time == mtd.exposure_time for mtd in metadata[1:]):
+        logger.info("The burst contains images with different exposures: %s." % [mtd.exposure_time for mtd in metadata])
 
     if max_search_radius % 8 != 0:
         raise ValueError(f"max_search_radius should be multiple of 8, but got {max_search_radius}")
@@ -1062,9 +1041,7 @@ def merge_images(
     noise_scales, noise_offsets = get_noise_profile(reference_image, reference_metadata)
 
     # Adaptive Robustness (k): Increase k at higher ISOs to allow more temporal averaging (denoising) when the signal is weak.
-    current_iso = metadata[0].get("ISO")
-    if not current_iso:
-        raise RuntimeError("ISO is not provided in the metadata.")
+    current_iso = metadata[0].iso
     stops = np.log2(current_iso / 100.0)
     # VW-SAD scores are in "sigma units", k = 1.0 means we trust differences up to 1 standard deviation.
     k_adaptive = 1.0 + (0.5 * stops)

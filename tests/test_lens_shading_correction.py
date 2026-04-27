@@ -1,6 +1,10 @@
+from dataclasses import replace
+from pathlib import Path
+
 import numpy as np
 import pytest
 
+from ispfoundry.datasets import Metadata
 from ispfoundry.pipeline_steps.lens_shading_correction import (
     align_cfa_pattern,
     apply_lens_shading_correction,
@@ -28,20 +32,34 @@ def sample_images():
 
 
 @pytest.fixture
-def sample_metadata():
-    """Fixture for sample metadata with color description and raw pattern."""
-    return [
-        {"color_desc": "RGBG", "raw_pattern": np.array([[2, 2], [1, 0]]), "ImageHeight": 2, "ImageWidth": 2},
-        {"color_desc": "RGBG", "raw_pattern": np.array([[2, 2], [1, 0]]), "ImageHeight": 2, "ImageWidth": 2},
-    ]
-
-
-@pytest.fixture
 def sample_lsc_maps():
     """Fixture for a sample list of lens shading maps."""
     return [
         np.array([[[1, 2, 3, 4]]], dtype=np.float32),
         np.array([[[5, 6, 7, 8]]], dtype=np.float32),
+    ]
+
+
+@pytest.fixture
+def sample_metadata():
+    """Fixture for sample metadata."""
+    mtd = Metadata(
+        file_path=Path("test_file_path"),
+        image_width=2,
+        image_height=2,
+        black_levels=np.array([50, 60, 70, 80]),  # R, Gr, Gb, B
+        white_level=1000,
+        color_description="RGBG",
+        raw_pattern=np.array([[2, 2], [1, 0]]),
+        exposure_time=0.1,
+        iso=100,
+        cfa_plane_color="Red,Green,Blue",
+        noise_profile=None,
+        camera_model_name="test_camera",
+    )
+    return [
+        replace(mtd),
+        replace(mtd),
     ]
 
 

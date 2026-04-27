@@ -54,7 +54,7 @@ line-length = 120
 "*.ipynb" = [
   "T201", # `print` found
 ]
-"test_*.py" = [
+"tests/**" = [
   "ANN", # Type annotations
   "ARG001", # Unused function argument
   "D", # Disable all docstring rules for tests

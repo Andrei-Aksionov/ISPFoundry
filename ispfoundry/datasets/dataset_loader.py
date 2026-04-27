@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Any, Dict, List, Union
+from typing import List, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -7,7 +7,7 @@ import rawpy
 import tifffile
 from loguru import logger
 
-from ispfoundry.utils import get_exif_metadata
+from ispfoundry.datasets import Metadata, extract_metadata
 
 
 class DatasetLoader:
@@ -34,7 +34,7 @@ class DatasetLoader:
         self.dng_file_paths = sorted(self.folder_path.glob("payload_*.dng"))
 
         self.raw_images: np.ndarray
-        self.metadata: List[Dict[str, Any]]
+        self.metadata: List[Metadata]
         self.lsc_maps: List[np.ndarray]
 
     def load_data(self) -> None:
@@ -66,7 +66,7 @@ class DatasetLoader:
 
         return np.stack(raw_images)
 
-    def get_metadata(self) -> List[Dict[str, Any]]:
+    def get_metadata(self) -> List[Metadata]:
         """
         Extracts EXIF data and internal sensor constants from the DNG files.
 
@@ -74,28 +74,14 @@ class DatasetLoader:
         in the initial metadata.
 
         Returns:
-            List[Dict[str, Any]]: A list of dictionaries containing metadata
+            List[Metadata]: A list of Metadata classes containing metadata
                 for each image.
 
         """
 
         logger.info("Loading metadata")
-        metadata = get_exif_metadata(self.dng_file_paths)
 
-        for idx, p in enumerate(self.dng_file_paths):
-            with rawpy.imread(str(p)) as raw_obj:
-                metadata[idx].update({
-                    "color_desc": raw_obj.color_desc.decode(),
-                    "raw_pattern": raw_obj.raw_pattern,
-                })
-
-                if "black_level" not in metadata[idx]:
-                    metadata[idx]["black_level"] = raw_obj.black_level_per_channel
-
-                if "white_level" not in metadata[idx]:
-                    metadata[idx]["white_level"] = raw_obj.white_level
-
-        return metadata
+        return [extract_metadata(path) for path in self.dng_file_paths]
 
     def get_lens_shading_correction_maps(self) -> List[np.ndarray]:
         """

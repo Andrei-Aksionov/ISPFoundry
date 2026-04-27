@@ -10,6 +10,7 @@ from loguru import logger
 
 from ispfoundry import ISP_REGISTRY, ISPStep, pipeline_steps
 from ispfoundry.configs.config_loader import config
+from ispfoundry.datasets import Metadata
 from ispfoundry.utils import save_ndarray_as_jpg
 
 
@@ -37,7 +38,7 @@ class ISPPipeline:
     def run(
         self,
         raw_input: np.ndarray,
-        metadata: Sequence[dict],
+        metadata: Sequence[Metadata],
         config_overrides: dict[ISPStep, Any] | None = None,
         save_to_folder: Path | None = None,
     ) -> np.ndarray:
@@ -46,7 +47,7 @@ class ISPPipeline:
 
         Args:
             raw_input: 3D Numpy array of shape (N, H, W) containing raw images.
-            metadata: A sequence of dictionaries containing metadata for each image.
+            metadata: A sequence of Metadata classes containing metadata for each image.
             config_overrides: An optional dictionary to override default parameters for specific
                     ISP steps. The keys are ISPStep enum values and values are
                     dictionaries of parameters.
@@ -106,7 +107,7 @@ class ISPPipeline:
         self,
         step: ISPStep,
         image_input: np.ndarray,
-        metadata: Sequence[dict],
+        metadata: Sequence[Metadata],
         config_overrides: dict,
     ) -> np.ndarray:
         """
@@ -115,7 +116,7 @@ class ISPPipeline:
         Args:
             step: The ISPStep enum value representing the step to execute.
             image_input: 3D Numpy array of shape (N, H, W) containing raw images.
-            metadata: A sequence of dictionaries containing metadata for each image.
+            metadata: A sequence of Metadata classes containing metadata for each image.
             config_overrides: An optional dictionary containing any configuration overrides specific to this step.
 
         Returns:
