@@ -1,6 +1,7 @@
+import types
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Any
+from typing import Any, Union, get_args, get_origin
 
 import numpy as np
 import rawpy
@@ -107,6 +108,10 @@ class Metadata:
         """Validates the metadata fields to ensure ISP steps will not fail."""
         # 1. First, ensure non-optional fields are actually provided
         self._check_non_optional_fields()
+        # And that string are not empty (unless they are optional)
+        self._check_string_fields()
+        # And that numpy arrays aren't empty
+        self._check_numpy_arrays()
 
         # 2. Then run specific value logic
         self._validate_geometry()
@@ -125,6 +130,50 @@ class Metadata:
 
             if value is None and not is_optional:
                 raise TypeError(f"Field '{field.name}' is mandatory but received 'None'. Expected type: {field.type}")
+
+    def _check_string_fields(self) -> None:
+        """
+        Check fields of type str.
+
+        Automatically ensures that any string field (including Optional[str])
+        is not just whitespace, provided the value is not None.
+        """  # noqa: DOC501
+
+        for f in fields(self):
+            value = getattr(self, f.name)
+
+            # Skip if the value is None (we handle mandatory None in the other check)
+            if value is None:
+                continue
+
+            # Determine if 'str' is the type or part of a Union (e.g., str | None)
+            is_str_type = f.type is str or (
+                get_origin(f.type) in (Union, getattr(types, "UnionType", None)) and str in get_args(f.type)
+            )
+
+            if is_str_type and isinstance(value, str) and not value.strip():
+                raise ValueError(f"Field '{f.name}' cannot be an empty or whitespace-only string.")
+
+    def _check_numpy_arrays(self) -> None:
+        """
+        Checks numpy arrays.
+
+        Automatically ensures that any NumPy array field is not empty (size > 0),
+        provided the value is not None.
+        """  # noqa: DOC501
+        for f in fields(self):
+            value = getattr(self, f.name)
+
+            if value is None:
+                continue
+
+            # Check if the type hint is np.ndarray or contains np.ndarray (Union)
+            is_numpy_type = f.type is np.ndarray or (
+                get_origin(f.type) in (Union, getattr(types, "UnionType", None)) and np.ndarray in get_args(f.type)
+            )
+
+            if is_numpy_type and isinstance(value, np.ndarray) and value.size == 0:
+                raise ValueError(f"Field '{f.name}' is a NumPy array but it is empty (size 0).")
 
     def _validate_geometry(self) -> None:
         """Ensures dimensions are positive and non-zero."""  # noqa: DOC501
@@ -208,7 +257,10 @@ def extract_metadata(file_path: Path) -> Metadata:
     # Context Manager for safe RawPy handle management
     with rawpy.imread(str(file_path)) as raw_obj:
         # 1. Strict Black Level Handling
-        black_levels = exif.get("BlackLevel") or raw_obj.black_level_per_channel
+        black_levels = exif.get("BlackLevel")
+        if black_levels is None:
+            black_levels = raw_obj.black_level_per_channel
+
         if isinstance(black_levels, str):
             black_levels = np.fromstring(black_levels, sep=" ")
         elif isinstance(black_levels, (list, np.ndarray)):
