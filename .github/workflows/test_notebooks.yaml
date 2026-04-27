@@ -53,4 +53,8 @@ jobs:
         run: uv sync
 
       - name: Running tests
+        env:
+          # This is a "no-op" backend. It handles all the calls but doesn't
+          # actually do any rendering work, which saves CPU and memory.
+          MPLBACKEND: Template
         run: uv run pytest tests/test_notebooks.py -vs
