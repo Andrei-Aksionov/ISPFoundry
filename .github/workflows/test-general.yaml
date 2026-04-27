@@ -29,7 +29,4 @@ jobs:
         run: uv sync
 
       - name: Running tests
-        run: |
-          uv run pytest tests/ \
-          --ignore=tests/test_dataset_downloader.py \
-          --ignore=tests/test_notebooks.py
+        run: uv run pytest tests/ --ignore=tests/test_dataset_downloader.py --ignore=tests/test_notebooks.py
