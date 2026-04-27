@@ -102,7 +102,6 @@ def apply_black_level_subtraction(
     metadata: Sequence[Metadata],
     inplace: bool = False,
 ) -> np.ndarray:
-    # TODO (andrei aksionau): update the docstring
     """
     Subtracts black levels from the raw image and normalizes into range [0, 1] using black and white levels.
 

@@ -1,14 +1,50 @@
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import pytest
 
+from ispfoundry.datasets import Metadata
 from ispfoundry.pipeline_steps.black_level_subtraction import (
     apply_black_level_subtraction,
     normalize_image,
     retrieve_black_levels,
     subtract_black_levels,
 )
+
+
+@pytest.fixture
+def sample_raw_image():
+    """Fixture for a sample RGGB Bayer raw image (4x4 for simplicity)."""
+    # RGGB pattern: R Gr, Gb, B
+    return np.array(
+        [
+            [100, 110, 120, 130],
+            [140, 150, 160, 170],
+            [180, 190, 200, 210],
+            [220, 230, 240, 250],
+        ],
+        dtype=np.float32,
+    )
+
+
+@pytest.fixture
+def sample_metadata():
+    """Fixture for sample metadata."""
+    return Metadata(
+        file_path=Path("test_file_path"),
+        image_width=2,
+        image_height=2,
+        black_levels=np.array([50, 60, 70, 80]),  # R, Gr, Gb, B
+        white_level=1000,
+        color_description="RGBG",
+        raw_pattern=np.array([[2, 2], [1, 0]]),
+        exposure_time=0.1,
+        iso=100,
+        cfa_plane_color="Red,Green,Blue",
+        noise_profile=None,
+        camera_model_name="test_camera",
+    )
 
 
 class TestRetrieveBlackLevels:

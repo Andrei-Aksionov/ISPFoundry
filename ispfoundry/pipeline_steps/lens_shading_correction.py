@@ -1,19 +1,22 @@
+from typing import Sequence
+
 import cv2
 import numpy as np
 from loguru import logger
 
 from ispfoundry import ISPStep, register_step
 from ispfoundry.configs.config_loader import config
+from ispfoundry.datasets import Metadata
 from ispfoundry.utils import decode_cfa
 
 
-def align_cfa_pattern(lsc_maps: list[np.ndarray], metadata: list[dict]) -> list[np.ndarray]:
+def align_cfa_pattern(lsc_maps: Sequence[np.ndarray], metadata: Sequence[Metadata]) -> list[np.ndarray]:
     """
     Aligns the CFA pattern of lens shading maps to match that of the images.
 
     Args:
-        lsc_maps: List of lens shading maps.
-        metadata: List of metadata dictionaries containing color description and raw pattern information.
+        lsc_maps: Sequence of lens shading maps.
+        metadata: Sequence of metadata classes containing color description and raw pattern information.
 
     Returns:
         list: List of lens shading maps with aligned CFA patterns.
@@ -27,11 +30,11 @@ def align_cfa_pattern(lsc_maps: list[np.ndarray], metadata: list[dict]) -> list[
     lsc_cfa = config.pipeline.lsc_cfa
     lsc_maps_reordered = []
 
-    for idx, (lsc_map, mt) in enumerate(zip(lsc_maps, metadata)):
-        color_description = mt.get("color_desc")
+    for idx, (lsc_map, mtd) in enumerate(zip(lsc_maps, metadata)):
+        color_description = mtd.color_description
         if not color_description:
             raise ValueError(f"Color description is missing in the metadata[{idx}].")
-        raw_pattern = mt.get("raw_pattern")
+        raw_pattern = mtd.raw_pattern
         if raw_pattern is None or raw_pattern.size == 0:
             raise ValueError(f"Raw pattern is missing in the metadata[{idx}].")
 
@@ -42,28 +45,21 @@ def align_cfa_pattern(lsc_maps: list[np.ndarray], metadata: list[dict]) -> list[
     return lsc_maps_reordered
 
 
-def interpolate(lsc_map: np.ndarray, metadata: dict) -> np.ndarray:
+def interpolate(lsc_map: np.ndarray, metadata: Metadata) -> np.ndarray:
     """
     Interpolates the lens shading map to match the dimensions of the original image.
 
     Args:
         lsc_map: Lens shading map.
-        metadata: Metadata dictionary containing width and height information.
+        metadata: Metadata class containing width and height information.
 
     Returns:
         np.ndarray: Interpolated lens shading map.
 
-    Raises:
-        ValueError: If ImageWidth or ImageHeight is missing in the metadata.
-
     """
 
-    width = metadata.get("ImageWidth")
-    if not width:
-        raise ValueError("ImageWidth is missing in the metadata.")
-    height = metadata.get("ImageHeight")
-    if not height:
-        raise ValueError("ImageHeight is missing in the metadata.")
+    width = metadata.image_width
+    height = metadata.image_height
 
     interpolated_lsc_planes = []
     for lsc_plane in np.unstack(lsc_map, axis=-1):
@@ -103,8 +99,8 @@ def apply_single_image(img: np.ndarray, lsc_map: np.ndarray, inplace: bool = Fal
 @register_step(ISPStep.LENS_SHADING_CORRECTION)
 def apply_lens_shading_correction(
     input_images: np.ndarray,
-    metadata: list[dict],
-    lsc_maps: list[np.ndarray],
+    metadata: Sequence[Metadata],
+    lsc_maps: Sequence[np.ndarray],
     inplace: bool = False,
 ) -> np.ndarray:
     """
@@ -112,8 +108,8 @@ def apply_lens_shading_correction(
 
     Args:
         input_images: 3D Numpy array of shape (N, H, W) containing input images.
-        metadata: List of metadata dictionaries for each image, containing color description and raw pattern information.
-        lsc_maps: List of lens shading maps corresponding to the images.
+        metadata: Sequence of metadata classes for each image, containing color description and raw pattern information.
+        lsc_maps: Sequence of lens shading maps corresponding to the images.
         inplace: If True, modifies the input images in place; otherwise, creates copies and returns them.
 
     Returns:
