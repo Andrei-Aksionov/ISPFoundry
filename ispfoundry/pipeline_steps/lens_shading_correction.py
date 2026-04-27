@@ -21,22 +21,15 @@ def align_cfa_pattern(lsc_maps: Sequence[np.ndarray], metadata: Sequence[Metadat
     Returns:
         list: List of lens shading maps with aligned CFA patterns.
 
-    Raises:
-        ValueError: If the color description or raw pattern is missing in any metadata.
-
     """
 
     # CFA of the lens shading map might be different to the CFA of the image
     lsc_cfa = config.pipeline.lsc_cfa
     lsc_maps_reordered = []
 
-    for idx, (lsc_map, mtd) in enumerate(zip(lsc_maps, metadata)):
+    for lsc_map, mtd in zip(lsc_maps, metadata):
         color_description = mtd.color_description
-        if not color_description:
-            raise ValueError(f"Color description is missing in the metadata[{idx}].")
         raw_pattern = mtd.raw_pattern
-        if raw_pattern is None or raw_pattern.size == 0:
-            raise ValueError(f"Raw pattern is missing in the metadata[{idx}].")
 
         image_cfa = decode_cfa(color_description, raw_pattern)
         reordering_indices = [image_cfa.index(ch) for ch in lsc_cfa]
