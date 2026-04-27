@@ -12,6 +12,9 @@ on:
 
 jobs:
   test_notebooks:
+    # --- KILL SWITCH ---
+    if: false  # Set this to 'true' when the project is finished
+    # -----------------------------
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -19,11 +22,6 @@ jobs:
         python-version: ['3.13']
 
     steps:
-      - name: Workflow Disabled
-        run: |
-          echo "Reason: This workflow is temporarily disabled to save CI minutes"
-          exit 0  # This force-fails the step and stops the workflow
-
         # Installing ExifTool
       - name: Install system dependencies (Ubuntu)
         if: runner.os == 'Linux'
