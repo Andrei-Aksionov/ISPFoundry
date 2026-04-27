@@ -33,5 +33,10 @@ jobs:
       - name: Install Python dependencies via uv sync
         run: uv sync
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y exiftool
+
       - name: Running tests
         run: uv run pytest tests/test_notebooks.py -vs
