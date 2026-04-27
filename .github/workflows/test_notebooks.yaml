@@ -1,0 +1,63 @@
+name: Test notebooks
+on:
+  push:
+    branches: [main]
+    paths: &shared_paths
+      - tests/test_notebooks.py
+      - notebooks/
+      - .github/workflows/test-notebooks.yaml
+  pull_request:
+    branches: [main]
+    paths: *shared_paths
+
+jobs:
+  test_notebooks:
+    # --- KILL SWITCH ---
+    if: false  # Set this to 'true' when the project is finished
+    # -----------------------------
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ['3.13']
+
+    steps:
+        # Installing ExifTool
+      - name: Install system dependencies (Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y exiftool
+
+      - name: Install system dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: choco install exiftool
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install exiftool
+
+      # GSUtil
+      - name: Set up gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: 'gsutil'
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install Python dependencies via uv sync
+        run: uv sync
+
+      - name: Running tests
+        env:
+          # This is a "no-op" backend. It handles all the calls but doesn't
+          # actually do any rendering work, which saves CPU and memory.
+          MPLBACKEND: Template
+        run: uv run pytest tests/test_notebooks.py -vs

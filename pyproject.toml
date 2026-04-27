@@ -24,6 +24,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "nbqa>=1.9.1",
+    "nbconvert>=7.17.1",
     "pre-commit>=4.5.1",
     "pyright>=1.1.408",
     "pytest>=9.0.2",
@@ -33,6 +34,10 @@ dev = [
 [build-system]
 requires = ["setuptools>=80.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+markers = ["slow: marks tests as slow (deselect with -m 'not slow')"]
+filterwarnings = ["ignore::FutureWarning"]
 
 [tool.setuptools.packages.find]
 where = ["."]

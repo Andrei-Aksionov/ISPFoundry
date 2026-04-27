@@ -1,6 +1,9 @@
+import pytest
+
 from ispfoundry.datasets.hdrplus_downloader import HDRPlusDatasetDownloader
 
 
+@pytest.mark.slow
 class TestHDRPlusDatasetDownloader:
     source_path = "hdrplusdata/20171106_subset/bursts/0006_20160722_115157_431"
     expected_folder_name = "0006_20160722_115157_431"
