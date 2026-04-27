@@ -12,6 +12,7 @@ on:
 
 jobs:
   dataset_downloader_test:
+    name: ${{ matrix.os }} (Py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:

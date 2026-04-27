@@ -7,6 +7,7 @@ on:
 
 jobs:
   pre-commit:
+    name: ${{ matrix.os }} (Py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
