@@ -1,6 +1,7 @@
 import shutil
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import Sequence
 from unittest.mock import MagicMock, patch
@@ -10,6 +11,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from ispfoundry import ISPStep
+from ispfoundry.datasets import Metadata
 from ispfoundry.pipeline import ISPPipeline
 
 
@@ -27,7 +29,22 @@ class TestISPPipeline(unittest.TestCase):
             np.array([1] * 4, dtype=np.float32),
             np.array([2] * 4, dtype=np.float32),
         ])
-        self.metadata = [{"id": 101}, {"id": 102}]
+        mtd = Metadata(
+            file_path=Path("test_file_path"),
+            image_width=2,
+            image_height=2,
+            black_levels=np.array([50, 60, 70, 80]),  # R, Gr, Gb, B
+            white_level=1000,
+            color_description="RGBG",  # R=index0, G=index1, B=index2, G=index3
+            raw_pattern=np.array([[0, 1], [3, 2]]),  # Standard RGGB
+            exposure_time=0.1,
+            iso=100,
+            cfa_plane_color="Red,Green,Blue",
+            # 3 pairs of (Scale, Offset): R=(0.01, 0.001), G=(0.02, 0.002), B=(0.03, 0.003)
+            noise_profile=np.array([0.01, 0.001, 0.02, 0.002, 0.03, 0.003]),
+            camera_model_name="test_camera",
+        )
+        self.metadata = [replace(mtd), replace(mtd)]
         self.test_dir = Path(tempfile.mkdtemp())
 
         # Standard mock config used across tests
