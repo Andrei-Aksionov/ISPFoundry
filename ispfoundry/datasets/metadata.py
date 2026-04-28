@@ -10,7 +10,7 @@ from loguru import logger
 from ispfoundry.utils import get_exif_metadata
 
 
-@dataclass(kw_only=True, slots=True)
+@dataclass(kw_only=True, slots=True, frozen=True)
 class Metadata:
     file_path: Path
     """
