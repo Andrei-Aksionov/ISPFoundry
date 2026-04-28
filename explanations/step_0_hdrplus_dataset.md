@@ -1,28 +1,48 @@
 # HDR+ Dataset Overview
 
-For the custom ISP pipeline I'll be using images from the HDR+ dataset. Let me explain what it is.
+A curated collection of raw sensor data designed for computational photography and high dynamic range research.
 
-The [HDR+ dataset](https://hdrplusdata.org/dataset.html) is a collection of raw sensor data and processed images captured using Google's HDR+ computational photography pipeline. It is primarily used for research in high dynamic range (HDR) imaging and low-light photography.
+The [HDR+ dataset](https://hdrplusdata.org/dataset.html) dataset serves as a benchmark for the ISP pipeline, providing the raw materials necessary to reconstruct professional-grade imagery from mobile sensor data. It centers on the concept of burst photography - capturing a rapid sequence of frames to overcome the physical limitations of small sensors.
 
-## Burst Photography
+<br>
 
-A single scene in this dataset consists of multiple **DNG (Digital Negative)** files, forming a "burst". This approach is used for:
+## Burst Methodology
 
-* **SNR Improvement:** By aligning and merging multiple frames, temporal noise is reduced, increasing the Signal-to-Noise Ratio (SNR) and widening the usable dynamic range.
-* **Highlight Preservation:** Images are often captured with short exposure times (underexposed) to prevent highlights (like the sky) from clipping.
-* **Motion Robustness:** Short exposures minimize motion blur and camera shake, making it easier to align frames.
+Rather than a single long exposure, the dataset utilizes a burst of Digital Negative (DNG) files. This approach provides three primary advantages for digital signal processing:
 
-## Included Files
+**Signal-to-Noise Improvement**<br>
+By aligning and merging multiple frames, temporal noise is mathematically reduced. This increases the Signal-to-Noise Ratio (SNR) and effectively widens the usable dynamic range.
 
-In a typical burst directory, you will find:
+**Highlight Preservation**<br>
+Frames are intentionally underexposed to protect highlight data from clipping. The lost shadows are later recovered through the merging process.
 
-* **`payload_*.dng`**: The raw sensor images.
-* **`lens_shading_map_*.tiff`**: Low-resolution 4-channel maps used to correct for **vignetting** and color shading.
-* **`rgb2rgb.txt`**: A 3x3 **Color Correction Matrix (CCM)** that transforms sensor-specific RGB values into a standard linear sRGB color space.
-* **`timing.txt`**: Logs providing execution times for the three main pipeline stages: **Align**, **Merge**, and **Finish**.
+**Motion Robustness**<br>
+Short exposure times minimize the impact of camera shake and subject movement, ensuring that the alignment stage remains accurate.
 
-## HDR+ Pipeline Stages
+<br>
 
-1. **Align:** Identifying a reference frame and aligning the burst.
-2. **Merge:** Averaging aligned frames to reduce noise.
-3. **Finish:** Applying the ISP pipeline (Black Level, White Balance, Demosaic, CCM, and Tone Mapping).
+## Technical Components
+
+Each burst directory contains the specific metadata and raw data required for the reconstruction process.
+
+| Resource | Description |
+| :--- | :--- |
+| **`payload_*.dng`** | The raw sensor images containing the Bayer-pattern data. |
+| **`lens_shading_map_*.tiff`** | Four-channel maps used to correct vignetting and color shading. |
+| **`rgb2rgb.txt`** | A 3x3 CCM for transforming sensor RGB into linear sRGB space. |
+| **`timing.txt`** | Execution logs for the Align, Merge, and Finish stages. |
+
+<br>
+
+## Pipeline Execution
+
+The transition from raw data to a finished image is handled in three distinct phases.
+
+**1. Align**<br>
+Identification of a reference frame followed by the spatial alignment of the remaining burst.
+
+**2. Merge**<br>
+The mathematical averaging of aligned frames to suppress noise while maintaining detail.
+
+**3. Finish**<br>
+The final ISP application: Black Level, White Balance, Demosaic, CCM, and Tone Mapping.
