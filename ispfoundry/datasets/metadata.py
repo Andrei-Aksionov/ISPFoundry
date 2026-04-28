@@ -106,14 +106,14 @@ class Metadata:
 
     def __post_init__(self) -> None:
         """Validates the metadata fields to ensure ISP steps will not fail."""
-        # 1. First, ensure non-optional fields are actually provided
+        # Structural checks
         self._check_non_optional_fields()
-        # And that string are not empty (unless they are optional)
         self._check_string_fields()
-        # And that numpy arrays aren't empty
         self._check_numpy_arrays()
+        # "Lock" numpy arrays
+        self._make_numpy_arrays_readonly()
 
-        # 2. Then run specific value logic
+        # ISP logic
         self._validate_geometry()
         self._validate_levels()
         self._validate_isp_requirements()
@@ -179,6 +179,13 @@ class Metadata:
                 # Check for empty array
                 if value.size == 0:
                     raise ValueError(f"Field '{f.name}' is an empty NumPy array (size 0).")
+
+    def _make_numpy_arrays_readonly(self) -> None:
+        """Sets the WRITEABLE flag to False for all ndarray fields."""
+        for f in fields(self):
+            value = getattr(self, f.name)
+            if isinstance(value, np.ndarray):
+                value.setflags(write=False)
 
     def _validate_geometry(self) -> None:
         """Ensures dimensions are positive and non-zero."""  # noqa: DOC501
