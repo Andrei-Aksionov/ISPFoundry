@@ -10,7 +10,7 @@ from loguru import logger
 from ispfoundry.utils import get_exif_metadata
 
 
-@dataclass(kw_only=True, slots=True)
+@dataclass(kw_only=True, slots=True, frozen=True)
 class Metadata:
     file_path: Path
     """
@@ -106,14 +106,14 @@ class Metadata:
 
     def __post_init__(self) -> None:
         """Validates the metadata fields to ensure ISP steps will not fail."""
-        # 1. First, ensure non-optional fields are actually provided
+        # Structural checks
         self._check_non_optional_fields()
-        # And that string are not empty (unless they are optional)
         self._check_string_fields()
-        # And that numpy arrays aren't empty
         self._check_numpy_arrays()
+        # "Lock" numpy arrays
+        self._make_numpy_arrays_readonly()
 
-        # 2. Then run specific value logic
+        # ISP logic
         self._validate_geometry()
         self._validate_levels()
         self._validate_isp_requirements()
@@ -172,8 +172,20 @@ class Metadata:
                 get_origin(f.type) in (Union, getattr(types, "UnionType", None)) and np.ndarray in get_args(f.type)
             )
 
-            if is_numpy_type and isinstance(value, np.ndarray) and value.size == 0:
-                raise ValueError(f"Field '{f.name}' is a NumPy array but it is empty (size 0).")
+            if is_numpy_type:
+                # Check for type mismatch (e.g., someone passed a list)
+                if not isinstance(value, np.ndarray):
+                    raise TypeError(f"Field '{f.name}' must be a numpy.ndarray, but got {type(value)}.")
+                # Check for empty array
+                if value.size == 0:
+                    raise ValueError(f"Field '{f.name}' is an empty NumPy array (size 0).")
+
+    def _make_numpy_arrays_readonly(self) -> None:
+        """Sets the WRITEABLE flag to False for all ndarray fields."""
+        for f in fields(self):
+            value = getattr(self, f.name)
+            if isinstance(value, np.ndarray):
+                value.setflags(write=False)
 
     def _validate_geometry(self) -> None:
         """Ensures dimensions are positive and non-zero."""  # noqa: DOC501

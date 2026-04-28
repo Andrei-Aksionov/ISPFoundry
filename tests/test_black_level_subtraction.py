@@ -93,11 +93,13 @@ class TestSubtractBlackLevels:
             subtract_black_levels(image, sample_metadata)
 
     def test_negative_values_are_preserved(self, sample_raw_image, sample_metadata):
-        # Ensuring at least one green channel value is negative after subtraction
-        sample_metadata.black_levels[0] = sample_raw_image[::2, ::2].max() + 10
-        result = subtract_black_levels(sample_raw_image, sample_metadata)
+        # Ensuring at least one channel value is negative after subtraction
+        red_bl = sample_raw_image[::2, ::2].max() + 10
+        new_black_levels = np.append(red_bl, sample_metadata.black_levels[1:])
+        metadata = replace(sample_metadata, black_levels=new_black_levels)
+        result = subtract_black_levels(sample_raw_image, metadata)
         expected = sample_raw_image.copy()
-        black_levels = sample_metadata.black_levels
+        black_levels = metadata.black_levels
         for idx, black_level in enumerate(black_levels):
             row_offset, col_offset = divmod(idx, 2)
             expected[row_offset::2, col_offset::2] -= black_level

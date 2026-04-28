@@ -275,16 +275,14 @@ class TestFindSharpestImageIdx:
         row, col = np.indices(long_exp_img.shape)
         mask = (row // 8 + col // 8) % 2 == 0
         long_exp_img[mask] = 1.0  # High signal
-        long_metadata = replace(sample_metadata)
-        long_metadata.exposure_time = 0.004  # 4x longer than base
+        long_metadata = replace(sample_metadata, exposure_time=0.004)  # 4x longer than base
 
         # 2. Create a "Short Exposure" image: slightly blurry, lower contrast
         # In a real burst, this might happen due to slight hand shake
         short_exp_img = np.zeros((32, 32), dtype=np.float32)
         short_exp_img[mask] = 0.7  # Lower signal
         short_exp_img = gaussian_filter(short_exp_img.astype(float), sigma=0.8).astype(np.float32)
-        short_metadata = replace(sample_metadata)
-        short_metadata.exposure_time = 0.001
+        short_metadata = replace(sample_metadata, exposure_time=0.001)
 
         # Even though index 0 (long) is mathematically "sharper" (higher variance),
         # index 1 (short) MUST be selected to avoid clipped highlights.
@@ -385,9 +383,9 @@ class TestGetNoiseProfile:
         """Verify mapping works correctly for a different Bayer phase (e.g., BGGR)."""
         image = np.zeros((10, 10), dtype=np.float32)
         # Change pattern to BGGR: 2=B, 1=G, 3=G, 0=R
-        sample_metadata.raw_pattern = [[2, 1], [3, 0]]
+        metadata = replace(sample_metadata, raw_pattern=np.array([[2, 1], [3, 0]]))
 
-        scales, offsets = get_noise_profile(image, sample_metadata)
+        scales, offsets = get_noise_profile(image, metadata)
 
         # Top-left should now be Blue scale (0.03)
         assert scales[0, 0] == 0.03
@@ -1427,7 +1425,7 @@ class TestMergeImages:
         """Verify that higher ISO results in a larger (more trusting) k_adaptive."""
         # ISO 100 -> stops = 0 -> k = 1.0
         # ISO 400 -> stops = 2 -> k = 1.0 + 0.5*2 = 2.0
-        mock_metadata[0].iso = 400
+        metadata = [replace(mock_metadata[0], iso=400), mock_metadata[1]]
 
         with (
             patch("ispfoundry.pipeline_steps.align_and_merge._parallel_tile_processor") as mock_proc,
@@ -1437,7 +1435,7 @@ class TestMergeImages:
                 return_value=(np.array([0]), np.array([0])),
             ),
         ):
-            merge_images(mock_burst, mock_metadata)
+            merge_images(mock_burst, metadata)
 
             # Check the k_adaptive passed to the processor
             passed_k = mock_proc.call_args.kwargs["k_adaptive"]

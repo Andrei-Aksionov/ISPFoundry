@@ -1,3 +1,4 @@
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -49,11 +50,46 @@ class TestAutomatedStructuralChecks:
         with pytest.raises(ValueError, match="cannot be an empty or whitespace-only string"):
             Metadata(**valid_params)
 
+    def test_numpy_type_enforcement(self, valid_params):
+        """
+        Verifies that passing a list instead of ndarray raises TypeError.
+        This specifically catches errors when using replace().
+        """
+        valid_params["raw_pattern"] = [[0, 1], [1, 2]]  # List instead of np.ndarray
+        with pytest.raises(TypeError, match="must be a numpy.ndarray"):
+            Metadata(**valid_params)
+
     def test_empty_numpy_array_check(self, valid_params):
         """Ensures numpy arrays have actual data."""
         valid_params["raw_pattern"] = np.array([])
-        with pytest.raises(ValueError, match="is a NumPy array but it is empty"):
+        with pytest.raises(ValueError, match="is an empty NumPy array"):
             Metadata(**valid_params)
+
+
+class TestImmutability:
+    """Tests that the 'frozen' status and 'readonly' flags are enforced."""
+
+    def test_frozen_attributes(self, valid_params):
+        """Verifies that field values cannot be reassigned (FrozenInstanceError)."""
+        metadata = Metadata(**valid_params)
+        with pytest.raises(FrozenInstanceError):
+            metadata.iso = 200  # ty:ignore[invalid-assignment]
+
+    def test_numpy_readonly_flag(self, valid_params):
+        """Verifies that internal array data cannot be modified."""
+        metadata = Metadata(**valid_params)
+
+        assert metadata.black_levels.flags.writeable is False
+        with pytest.raises(ValueError, match="read-only"):
+            metadata.black_levels[0] = 100.0
+
+    def test_replace_validation_bypass_prevention(self, valid_params):
+        """Ensures replace() still triggers __post_init__ and catches bad types."""
+        metadata = Metadata(**valid_params)
+
+        # Attempting to 'smuggle' a list through replace()
+        with pytest.raises(TypeError, match="must be a numpy.ndarray"):
+            replace(metadata, raw_pattern=[[0, 0], [0, 0]])
 
 
 class TestDomainValidation:
