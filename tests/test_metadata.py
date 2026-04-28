@@ -52,7 +52,7 @@ class TestAutomatedStructuralChecks:
     def test_empty_numpy_array_check(self, valid_params):
         """Ensures numpy arrays have actual data."""
         valid_params["raw_pattern"] = np.array([])
-        with pytest.raises(ValueError, match="is a NumPy array but it is empty"):
+        with pytest.raises(ValueError, match="is an empty NumPy array"):
             Metadata(**valid_params)
 
 

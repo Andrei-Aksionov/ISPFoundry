@@ -172,8 +172,13 @@ class Metadata:
                 get_origin(f.type) in (Union, getattr(types, "UnionType", None)) and np.ndarray in get_args(f.type)
             )
 
-            if is_numpy_type and isinstance(value, np.ndarray) and value.size == 0:
-                raise ValueError(f"Field '{f.name}' is a NumPy array but it is empty (size 0).")
+            if is_numpy_type:
+                # Check for type mismatch (e.g., someone passed a list)
+                if not isinstance(value, np.ndarray):
+                    raise TypeError(f"Field '{f.name}' must be a numpy.ndarray, but got {type(value)}.")
+                # Check for empty array
+                if value.size == 0:
+                    raise ValueError(f"Field '{f.name}' is an empty NumPy array (size 0).")
 
     def _validate_geometry(self) -> None:
         """Ensures dimensions are positive and non-zero."""  # noqa: DOC501
