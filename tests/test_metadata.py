@@ -44,6 +44,12 @@ class TestAutomatedStructuralChecks:
         metadata = Metadata(**valid_params)
         assert metadata.noise_profile is None
 
+    def test_int_type_enforcement(self, valid_params):
+        """Verifies that passing a string to an int field raises TypeError."""
+        valid_params["image_width"] = "1920"  # String instead of int
+        with pytest.raises(TypeError, match="must be of type <class 'int'>"):
+            Metadata(**valid_params)
+
     def test_empty_string_check(self, valid_params):
         """Ensures strings aren't just whitespace."""
         valid_params["color_description"] = "   "

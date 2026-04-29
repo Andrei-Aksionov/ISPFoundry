@@ -108,6 +108,7 @@ class Metadata:
         """Validates the metadata fields to ensure ISP steps will not fail."""
         # Structural checks
         self._check_non_optional_fields()
+        self._check_field_types()
         self._check_string_fields()
         self._check_numpy_arrays()
         # "Lock" numpy arrays
@@ -120,6 +121,7 @@ class Metadata:
 
     def _check_non_optional_fields(self) -> None:
         """Iterates through dataclass fields and raises TypeError if a non-Optional field is None."""  # noqa: DOC501
+
         for field in fields(self):
             value = getattr(self, field.name)
 
@@ -131,6 +133,35 @@ class Metadata:
             if value is None and not is_optional:
                 raise TypeError(f"Field '{field.name}' is mandatory but received 'None'. Expected type: {field.type}")
 
+    # flake8: noqa
+    def _check_field_types(self) -> None:
+        """
+        Strictly enforces that assigned values match the types defined in type hints.
+        Handles Union types and modern '|' syntax.
+        """
+
+        for field in fields(self):
+            value = getattr(self, field.name)
+
+            # Skip None (Mandatory/Optional logic is handled in _check_non_optional_fields)
+            if value is None:
+                continue
+
+            # Get the allowed types from the hint
+            origin = get_origin(field.type)
+            if origin in (Union, getattr(types, "UnionType", None)):
+                allowed_types = get_args(field.type)
+            else:
+                allowed_types = (field.type,)
+
+            # Filter out NoneType from allowed types for this specific check
+            actual_allowed = tuple(t for t in allowed_types if t is not type(None))
+
+            if not isinstance(value, actual_allowed):
+                raise TypeError(
+                    f"Field '{field.name}' must be of type {field.type}, but received {type(value).__name__}."
+                )
+
     def _check_string_fields(self) -> None:
         """
         Check fields of type str.
@@ -139,20 +170,20 @@ class Metadata:
         is not just whitespace, provided the value is not None.
         """  # noqa: DOC501
 
-        for f in fields(self):
-            value = getattr(self, f.name)
+        for field in fields(self):
+            value = getattr(self, field.name)
 
             # Skip if the value is None (we handle mandatory None in the other check)
             if value is None:
                 continue
 
             # Determine if 'str' is the type or part of a Union (e.g., str | None)
-            is_str_type = f.type is str or (
-                get_origin(f.type) in (Union, getattr(types, "UnionType", None)) and str in get_args(f.type)
+            is_str_type = field.type is str or (
+                get_origin(field.type) in (Union, getattr(types, "UnionType", None)) and str in get_args(field.type)
             )
 
             if is_str_type and isinstance(value, str) and not value.strip():
-                raise ValueError(f"Field '{f.name}' cannot be an empty or whitespace-only string.")
+                raise ValueError(f"Field '{field.name}' cannot be an empty or whitespace-only string.")
 
     def _check_numpy_arrays(self) -> None:
         """
@@ -161,29 +192,31 @@ class Metadata:
         Automatically ensures that any NumPy array field is not empty (size > 0),
         provided the value is not None.
         """  # noqa: DOC501
-        for f in fields(self):
-            value = getattr(self, f.name)
+
+        for field in fields(self):
+            value = getattr(self, field.name)
 
             if value is None:
                 continue
 
             # Check if the type hint is np.ndarray or contains np.ndarray (Union)
-            is_numpy_type = f.type is np.ndarray or (
-                get_origin(f.type) in (Union, getattr(types, "UnionType", None)) and np.ndarray in get_args(f.type)
+            is_numpy_type = field.type is np.ndarray or (
+                get_origin(field.type) in (Union, getattr(types, "UnionType", None))
+                and np.ndarray in get_args(field.type)
             )
 
             if is_numpy_type:
                 # Check for type mismatch (e.g., someone passed a list)
                 if not isinstance(value, np.ndarray):
-                    raise TypeError(f"Field '{f.name}' must be a numpy.ndarray, but got {type(value)}.")
+                    raise TypeError(f"Field '{field.name}' must be a numpy.ndarray, but got {type(value)}.")
                 # Check for empty array
                 if value.size == 0:
-                    raise ValueError(f"Field '{f.name}' is an empty NumPy array (size 0).")
+                    raise ValueError(f"Field '{field.name}' is an empty NumPy array (size 0).")
 
     def _make_numpy_arrays_readonly(self) -> None:
         """Sets the WRITEABLE flag to False for all ndarray fields."""
-        for f in fields(self):
-            value = getattr(self, f.name)
+        for field in fields(self):
+            value = getattr(self, field.name)
             if isinstance(value, np.ndarray):
                 value.setflags(write=False)
 
@@ -194,6 +227,7 @@ class Metadata:
 
     def _validate_levels(self) -> None:
         """Ensures black and white levels are consistent for normalization."""  # noqa: DOC501
+
         if self.black_levels.size != 4:
             raise ValueError(f"Expected 4 black level values, got {self.black_levels.size}")
 
@@ -206,6 +240,7 @@ class Metadata:
 
     def _validate_isp_requirements(self):
         """Validates fields specifically required by Align&Merge and LSC steps."""  # noqa: DOC501
+
         if not self.color_description or not self.color_description.strip():
             raise ValueError("color_description is missing or empty.")
 
