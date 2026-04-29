@@ -1,169 +1,156 @@
 # Align and Merge (Burst Photography)
 
-## What is Align and Merge?
-
-**Align and Merge** is a computational technique used to combine a sequence of images—called a **burst**—into a single, high-quality photograph. Modern sensors, especially those in smartphones, are physically small and limited in how much light they can capture in a single shot. Burst photography overcomes these hardware constraints by using software to "stack" multiple samples of the same scene.
+A computational technique used to combine a sequence of images (called a **burst**) into a single, high-quality photograph.<br> Modern sensors, especially those in smartphones, are physically small and limited in how much light they can capture in a single shot. Burst photography overcomes these hardware constraints by using software to "stack" multiple samples of the same scene.
 
 The process consists of two primary theoretical challenges:
 
-1. **Alignment**: Calculating the precise movement between frames so that every object in the scene sits at the exact same coordinate across the entire burst.
-2. **Merging**: Combining these aligned pixels while ignoring "outliers" (like a moving car or a walking person) to prevent visual artifacts.
+**Alignment** — Calculating the precise movement between frames so that every object in the scene sits at the exact same coordinate across the entire burst.
+
+**Merging** — Combining these aligned pixels while ignoring "outliers" (like a moving car or a walking person) to prevent visual artifacts and "ghosting."
+
+<br>
 
 ## Why Align and Merge?
 
-### 1. Improving the Signal-to-Noise Ratio (SNR)
+**Improving the Signal-to-Noise Ratio (SNR)** <br>
+SNR is the measure of "clean" image information (Signal) versus grainy interference (Noise). In low light, noise often overwhelms the signal. By averaging $N$ independent shots, the signal remains constant while the random noise partially cancels itself out.
 
-**Signal-to-Noise Ratio (SNR)** is a measure used to describe how much "clean" image information (Signal) there is compared to the grainy "interference" (Noise). In low-light conditions, noise usually overwhelms the signal.
+Mathematically, the noise is reduced by a factor of $\sqrt{N}$.<br>
+For example, if you merge **9 frames**, your noise is reduced by $3\times$. This allows a small mobile sensor to simulate the "cleanliness" of a sensor physically **9 times larger** in surface area.
 
-By averaging $N$ independent shots, the signal stays the same, but the random noise partially cancels itself out. Mathematically, the noise is reduced by a factor of $\sqrt{N}$.
+**Extending Dynamic Range** <br>
+A single exposure often forces a choice: capture detail in the shadows (blowing out the sky) or preserve the sky (crushing the shadows).
 
-**The "9x Sensor" Analogy**: If you merge **9 frames**, your noise is reduced by $\sqrt{9} = 3$. A sensor that is physically **9 times larger** in surface area also collects 9 times more photons. Since SNR also scales with the square root of the number of photons, that giant sensor would have the same "cleanliness" (3x better SNR) as your small sensor after merging 9 frames. In effect, burst photography allows software to simulate a much larger, more expensive sensor.
+* Zero-Shutter-Lag (All Short): Capturing many identical short, underexposed frames. Highlights are never clipped, and the merging process cleans up the noisy shadows.
+* Hybrid Burst (Short + Long): Capturing short frames for highlight detail and alignment, followed by one "long" exposure to serve as a high-quality anchor for the shadows.
 
-### 2. Extending Dynamic Range
+**"Lucky" Imaging** <br>
+Handheld photography involves constant camera shake. In a burst of 10 frames, 1 or 2 are likely captured during a moment of relative stability. The pipeline identifies this sharpest frame as the **Reference Frame**, using it as the coordinate master for the rest of the burst.
 
-A single exposure often forces a choice: capture detail in the dark shadows (making the sky "blow out" to pure white) or preserve the bright sky (making the shadows pitch black).
+<br>
 
-* **Zero-shutter-lag (All Short)**: Capturing many identical short, underexposed frames. Highlights are never clipped, and the merging process cleans up the noisy shadows.
-* **Hybrid Burst (Short + Long)**: Some pipelines capture a burst of short frames followed by one "long" exposure. The short frames provide the highlight detail and alignment data, while the long frame provides a high-quality "anchor" for the shadows.
+## Pipeline Priority
 
-### 3. "Lucky" Imaging
+The placement of this step is critical for the success of the alignment math and the quality of the merge.
 
-In handheld photography, your hand is constantly shaking. In a burst of 10 frames, 1 or 2 will likely be captured during a moment of relative stability. The pipeline identifies this "sharpest" frame and uses it as the **Reference Frame** to which all others are aligned.
+1. Black Level Subtraction (Mandatory)
+2. Lens Shading Correction (Highly recommended)
+3. ⇨ **Align and Merge** ⇦
+4. White Balance
+5. Demosaicing
 
-## Pipeline Order
+**Why After BLS and LSC?** <br>
+Alignment depends on comparing pixel values across frames. If there is a "fake" brightness offset (Black Level) or dark corners (Lens Shading), the math becomes biased. For example, a tile moving from a dark corner to the bright center would appear to "change" to the computer, even if the scene stayed the same, causing alignment to fail.
 
-The Align and Merge step must be carefully placed:
+**Why Before White Balance?** <br>
+White Balance applies different multipliers to the R, G, and B channels. If you WB first, you change the noise characteristics and relative "weight" of the channels. Merging in **Linear RAW** ensures that the noise follows a predictable physical model, which makes the **Ghost Rejection** math significantly more accurate.
 
-1. **Black Level Subtraction (BLS)**: Mandatory. Alignment depends on comparing pixel values. If there is a "fake" brightness offset from the sensor, it biases the math.
-2. **Lens Shading Correction (LSC)**: Highly Recommended. LSC removes the "vignetting" (dark corners). Without it, a tile moving from the dark corner to the bright center would look "different" to the computer, even if the scene didn't change, causing alignment to fail.
-3. ⭐ **Align and Merge**
-4. **White Balance (WB)**: Performed after merging.
+<br>
 
-### Why before White Balance?
+## Core Mechanisms: Alignment
 
-White Balance applies different multipliers to the Red, Green, and Blue channels. If you White Balance first, you change the noise characteristics and the relative "weight" of the channels. Merging in the **Linear RAW** space (before WB) ensures that the noise follows a predictable physical model, which makes the **Ghost Rejection** math much more accurate.
+**Tile-Based Strategy** <br>
+We do not align the "whole image" at once because real-world motion is **non-rigid**. Parallax (objects at different depths moving at different speeds), scene motion (a swaying tree), and rolling shutter skew mean that different parts of the image shift independently. Dividing the image into a grid (e.g., $16 \times 16$ blocks) allows the ISP to "warp" the frames locally to account for these complex distortions.
 
-## The Core Mechanisms
+**Hierarchical (Coarse-to-Fine) Search** <br>
+Searching for a 100-pixel move in a high-res image is computationally impossible for a phone. We use a **Hierarchical Search**:
 
-### Why Tile-Based Alignment?
+1. **Coarse Level:** Downsample the image to 1/16 size. A huge 100-pixel move becomes a tiny 6-pixel move, which is found instantly.
+2. **Fine Level:** Use that "rough" location as a starting point on the full-resolution image, searching only a tiny surrounding area ($\pm 1$ or $\pm 2$ pixels) to find the exact match.
+This provides a massive search window with minimal battery drain.
 
-We do not align the "whole image" at once because real-world motion is **non-rigid**. If you move your phone, different parts of the image shift differently due to:
+**Sub-pixel Refinement** <br>
+Pixels are discrete blocks, but light and motion are continuous. If an object moves **1.4 pixels**, aligning it to the nearest whole pixel (1 or 2) introduces a "misalignment error" that makes the final merge look blurry. We fit a **Quadratic Curve** to the alignment error scores to mathematically find the "bottom of the valley"—the true sub-pixel peak where error is absolute minimum.
 
-* **Parallax**: Objects close to the lens move faster than objects far away.
-* **Scene Motion**: A tree swaying in the wind moves independently of the background.
-* **Rolling Shutter**: CMOS sensors capture the image row-by-row; if the camera moves during capture, the image actually "bends" or "skews."
+<br>
 
-**Tile-based alignment** divides the image into a grid (e.g., $16 \times 16$ pixel blocks). By finding a unique motion vector for every tile, we can "warp" the frames to account for complex distortions that a single global shift could never fix.
+## Mathematical Foundation
 
-### Speed: The Hierarchical Search
+The efficacy of the Align and Merge process is governed by the statistical properties of sensor noise and the geometric precision of the alignment.
 
-Finding where a $16 \times 16$ tile moved in a 12-megapixel image is computationally expensive. If a person moved 100 pixels, you'd have to check thousands of possibilities. **Hierarchical (Coarse-to-Fine) Search** solves this:
+### 1. SNR and Dynamic Range
 
-1. **Coarse Level**: Downsample the image (e.g., to 1/4 or 1/16 size). A 100-pixel move becomes a tiny 6-pixel move. We find the "rough" location quickly.
-2. **Fine Level**: Use the rough location as a starting point on the full-resolution image and search only a tiny surrounding area (e.g., $\pm 1$ or $\pm 2$ pixels) to find the exact match.
-This reduces the mathematical complexity from an "impossible" amount of work to something a smartphone can do in milliseconds.
+In a digital image, any pixel value $I$ is composed of the true scene signal $S$ and random noise $n$. When we average $N$ perfectly aligned frames, we assume the signal $S$ is constant, while the noise $n$ is an independent random variable with a mean of zero and a standard deviation of $\sigma$.
 
-### Precision: Sub-pixel Refinement
-
-Pixels are discrete blocks, but light and motion are continuous. An object might move **1.4 pixels** to the right. If we only align to the nearest whole pixel (1 or 2), we introduce a "misalignment error." When we average these slightly-off frames, the result looks blurry or "soft."
-
-**Theory of Implementation**: We calculate the alignment error (usually **SAD - Sum of Absolute Differences**) for the best pixel and its immediate neighbors. By fitting a **Quadratic Curve** (a parabola) to these error values, we can mathematically find the "bottom of the valley"—the true sub-pixel peak—where the error is at its absolute minimum.
-
-## Mathematical Details of Align and Merge
-
-### 1. Signal-to-Noise Ratio (SNR) and Dynamic Range
-
-In a digital image, any pixel value $I$ is composed of the true scene signal $S$ and random noise $N$:
-
-$$I = S + N$$
-
-#### SNR Improvement
-
+**SNR Improvement**<br>
 When we average $M$ frames, we assume the signal $S$ is constant (perfectly aligned), while the noise $N$ is random with a mean of zero and a standard deviation of $\sigma$.
 
-* **Merged Signal**: The average of $M$ identical signals remains $S$.
-* **Merged Noise**: According to the **Central Limit Theorem**, when adding independent random variables, their variances add. The new noise $\sigma_{merged}$ is:
+* Merged Signal: The average of $M$ identical signals remains $S$.
+* Merged Noise: According to the *Central Limit Theorem*, when adding independent random variables, their variances add. The noise in the merged result ($\sigma_{merged}$) is reduced by the square root of the number of frames:
 
-$$\sigma_{merged} = \frac{1}{N} \sqrt{\sum_{i=1}^{N} \sigma^2} = \frac{\sqrt{N \cdot \sigma^2}}{N} = \frac{\sigma}{\sqrt{N}}$$
+$$\large \sigma_{merged} = \frac{1}{N} \sqrt{\sum_{i=1}^{N} \sigma^2} = \frac{\sqrt{N \cdot \sigma^2}}{N} = \frac{\sigma}{\sqrt{N}}$$
 
-**Explanation**: Dividing the single-frame noise by $\sqrt{M}$ significantly cleans the image. For example, merging **9 frames** reduces noise by a factor of **3**.
+**Dynamic Range (DR) Extension**<br>
+Dynamic Range is the ratio between the brightest signal the sensor can record ($S_{max}$) and the noise floor ($\sigma$). By reducing the noise floor to $\sigma_{merged}$, we widen the gap between the darkest and brightest parts of the image:
 
-#### Dynamic Range (DR) Extension
+$$\large DR = 20 \log_{10} \left( \frac{S_{max}}{\sigma_{merged}} \right)$$
 
-Dynamic Range is the ratio between the brightest signal the sensor can record ($S_{max}$) and the lowest signal distinguishable from noise (the **noise floor**, $\sigma$). It is measured in decibels (dB):
+By merging frames, we reduce the noise floor $\sigma$ to $\sigma_{merged}$. Because the denominator becomes smaller, the total range increases. This allows us to "see" further into the dark shadows where the signal was previously buried under grain, effectively widening the gap between the darkest and brightest parts of the image.
 
-$$DR = 20 \log_{10} \left( \frac{S_{max}}{\sigma} \right)$$
+### 2. Alignment: Integer and Sub-pixel Flow
 
-**Explanation**: By merging frames, we reduce the noise floor $\sigma$ to $\sigma_{merged}$. Because the denominator becomes smaller, the total range increases. This allows us to "see" further into the dark shadows where the signal was previously buried under grain, effectively widening the gap between the darkest and brightest parts of the image.
+Alignment maps a target frame $T$ onto a reference frame $R$ by finding a motion vector $(\Delta x, \Delta y)$ that minimizes the difference between them.
 
-### 2. Alignment: Integer and Sub-pixel "Flow"
+**Integer Alignment (SAD)**<br>
+To find the best whole-pixel movement, we calculate the *Sum of Absolute Differences (SAD)* for a given tile. We test various offsets and look for the minimum value:
 
-Alignment is the process of finding a motion vector (or "flow") that maps a target frame $T$ onto a reference frame $R$.
+$$\large SAD(\Delta x, \Delta y) = \sum_{i,j \in \text{Tile}} |R(i, j) - T(i + \Delta x, j + \Delta y)|$$
 
-#### Integer Alignment (SAD)
-
-To find the best whole-pixel movement, we calculate the **Sum of Absolute Differences (SAD)** for a given tile. We test various offsets $(\Delta x, \Delta y)$ and look for the minimum value:
-
-$$SAD(\Delta x, \Delta y) = \sum_{i,j \in \text{Tile}} |R(i, j) - T(i + \Delta x, j + \Delta y)|$$
+Where:
 
 * **$R(i, j)$**: Pixel value in the reference frame.
 * **$T(i + \Delta x, j + \Delta y)$**: Corresponding pixel in the target frame, shifted by the test offset.
-* **Minimum SAD**: The $(\Delta x, \Delta y)$ that results in the lowest sum is considered the best integer alignment.
 
-#### Sub-pixel Refinement (Flow Estimation)
-
+**Sub-pixel Refinement**<br>
 To find motion at a precision smaller than one pixel, we treat the SAD scores of the best integer match and its 8 neighbors as a 3D surface. We fit a **2D Quadratic Function** to these points:
 
-$$f(x, y) = Ax^2 + By^2 + Cxy + Dx + Ey + F$$
+$$\large f(x, y) = Ax^2 + By^2 + Cxy + Dx + Ey + F$$
 
-**Explanation of the Variables**:
+Where:
 
 * **$Ax^2, By^2, Cxy$**: These terms define the curvature (the shape of the "bowl").
 * **$Dx, Ey$**: These terms define the slope.
 * **$F$**: The vertical offset.
 
-By taking the partial derivatives $\frac{\partial f}{\partial x}$ and $\frac{\partial f}{\partial y}$ and setting them to zero, we solve for the exact coordinates $(x, y)$ of the "bottom of the bowl." This gives us the **sub-pixel flow vector**, allowing the pipeline to align frames with a precision of 0.1 pixels or better.
+By taking the partial derivatives $\frac{\partial f}{\partial x}$ and $\frac{\partial f}{\partial y}$ and setting them to zero, we solve for the exact coordinates of the "bottom of the valley." This provides a sub-pixel flow vector, maintaining sharpness during the merge.
 
 ### 3. Robust Merging (Ghost Rejection)
 
-To combine frames without creating "ghosts" of moving objects, we use a weighted average. The merged pixel value $I_{merged}$ is:
+To combine frames without creating "ghosts" of moving objects, we use a weighted average where the weight $w$ for a specific pixel is determined by its similarity to the reference frame, normalized by the expected noise variance $\sigma_{noise}^2$:
 
-$$I_{merged} = \frac{\sum_{i=1}^{M} w_i \cdot I_i}{\sum_{i=1}^{M} w_i}$$
+$$\large I_{merged} = \frac{\sum_{i=1}^{N} w_i \cdot I_i}{\sum_{i=1}^{N} w_i} \quad \text{where} \quad w = \exp \left( -\frac{D(R, T)}{k \cdot \sigma_{noise}^2} \right)$$
 
-#### The Weighting Formula
-
-The weight $w$ for a specific pixel or tile is determined by its similarity to the reference frame, normalized by the expected noise variance $\sigma_{noise}^2$:
-
-$$w = \exp \left( -\frac{D(R, T)}{k \cdot \sigma_{noise}^2} \right)$$
-
-**Explanation of the Formula**:
+Where:
 
 * **$D(R, T)$**: The "Distance" or difference (often the SAD score) between the reference and the target.
 * **$\sigma_{noise}^2$**: The expected noise variance. If the difference $D$ is within this range, it’s just noise—keep the weight high.
 * **$k$**: A "sensitivity" constant. A larger $k$ makes the algorithm more "forgiving" of motion, while a smaller $k$ is more aggressive at rejecting potential ghosts.
 * **$\exp(-\dots)$**: This creates an exponential drop-off. If an object moved (creating a huge $D$), the weight $w$ drops toward zero almost instantly, excluding that moving object from the final average.
 
-## Common Misconceptions
+If the difference $D$ between the reference and target is within the expected noise range, the weight remains high. If an object moved, creating a huge $D$, the exponential function drops the weight toward zero, excluding that moving object from the final average.
 
-### "More frames always result in a better image."
+<br>
 
-**Incorrect.** There is a sharp point of diminishing returns. Moving from 1 to 4 frames gives a massive boost ($\sqrt{4}=2\times$ noise reduction). However, to double that quality again, you would need 16 frames. Eventually, the massive battery drain and processing time outweigh the tiny visual gains. Furthermore, a longer burst increases the risk of "subject motion" (like a person blinking or a car moving) that the software might not be able to perfectly repair.
+## Technical Clarifications
 
-### "Align and Merge is only useful for low-light photography."
+**Diminishing Returns** <br>
+Moving from 1 to 4 frames gives a $2\times$ noise reduction. However, doubling that quality again requires 16 frames. A longer burst also increases the probability of unrepairable subject motion.
 
-**Incorrect.** While the noise reduction is most obvious in the dark, merging frames in broad daylight is a "secret weapon" for **image precision**.
+**Daylight Precision** <br>
+Burst photography isn't just for low light. By averaging frames in daylight, the math "fills in the gaps" between integer pixel steps, effectively increasing the bit-depth of the image and preventing color banding.
 
-In a single shot, your sensor captures data in discrete 10-bit or 12-bit integer steps. By averaging multiple frames, the math "fills in the gaps" between those steps with fractional values. This effectively increases the **bit-depth** (e.g., creating a 14-bit or 16-bit equivalent result). This provides much smoother color gradients and significantly more "headroom" for aggressive editing or tone mapping—preventing the image from "breaking" or showing ugly color banding in the sky.
+**Consensus Merging** <br>
+Simple averaging is inferior to robust merging. A sophisticated ISP looks for a "consensus" across frames; if a pixel is an outlier, it is rejected to ensure the result is clean and artifact-free.
 
-### "Simple averaging is the best way to merge."
+<br>
 
-**Incorrect.** If you simply average 10 frames and a bird flies through the frame in just one of them, you will end up with a "ghost bird" (a 10% transparent artifact). A sophisticated ISP uses **Robust Weights** to realize that the pixels containing the bird don't match the "consensus" of the other frames. It then excludes those specific pixels from the average, ensuring the final image is clean and artifact-free.
+---
 
-## Summary
+### Summary
 
-Align and Merge is the "brain" of the ISP. It:
+* Increases **SNR** and **Dynamic Range** by a factor of $\sqrt{N}$.
+* Uses **Hierarchical Tile-Based Search** for speed and complex motion.
+* Employs **Sub-pixel Refinement** to maintain per-pixel sharpness.
+* **Must** be performed in Linear RAW space before White Balance.
 
-* Increases **Signal-to-Noise Ratio (SNR)** by a factor of $\sqrt{N}$.
-* Uses **Tile-Based Hierarchical Search** to handle complex, non-rigid motion quickly.
-* Employs **Sub-pixel Refinement** to maintain sharpness.
-* Acts as a "software-defined sensor" to overcome the physical limits of small lenses.
+<br>

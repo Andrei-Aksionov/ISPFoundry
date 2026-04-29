@@ -85,8 +85,8 @@ To apply the map to the raw image, the grid must be upsampled to full resolution
 
 Lens shading correction **must occur after black level subtraction** but before the global white balance is applied.
 
-1. Black Level Subtraction
-2. ⇨ **Lens Shading Correction** ⇦
+1. Black Level Subtraction (Mandatory)
+2. ⇨ **Lens Shading Correction (Highly Recommended)** ⇦
 3. Align and Merge
 4. White Balance
 5. Demosaicing
