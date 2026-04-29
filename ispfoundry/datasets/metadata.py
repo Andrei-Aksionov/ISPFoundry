@@ -133,12 +133,8 @@ class Metadata:
             if value is None and not is_optional:
                 raise TypeError(f"Field '{field.name}' is mandatory but received 'None'. Expected type: {field.type}")
 
-    # flake8: noqa
     def _check_field_types(self) -> None:
-        """
-        Strictly enforces that assigned values match the types defined in type hints.
-        Handles Union types and modern '|' syntax.
-        """
+        """Strictly enforces that assigned values match the types defined in type hints."""  # noqa: DOC501
 
         for field in fields(self):
             value = getattr(self, field.name)
@@ -158,9 +154,7 @@ class Metadata:
             actual_allowed = tuple(t for t in allowed_types if t is not type(None))
 
             if not isinstance(value, actual_allowed):
-                raise TypeError(
-                    f"Field '{field.name}' must be of type {field.type}, but received {type(value).__name__}."
-                )
+                raise TypeError(f"Field '{field.name}' must be of type {field.type}, but received {type(value)}.")
 
     def _check_string_fields(self) -> None:
         """

@@ -62,7 +62,7 @@ class TestAutomatedStructuralChecks:
         This specifically catches errors when using replace().
         """
         valid_params["raw_pattern"] = [[0, 1], [1, 2]]  # List instead of np.ndarray
-        with pytest.raises(TypeError, match="must be a numpy.ndarray"):
+        with pytest.raises(TypeError, match="must be of type .*ndarray.*but received.*list"):
             Metadata(**valid_params)
 
     def test_empty_numpy_array_check(self, valid_params):
@@ -94,7 +94,7 @@ class TestImmutability:
         metadata = Metadata(**valid_params)
 
         # Attempting to 'smuggle' a list through replace()
-        with pytest.raises(TypeError, match="must be a numpy.ndarray"):
+        with pytest.raises(TypeError, match="must be of type .*ndarray.*but received.*list"):
             replace(metadata, raw_pattern=[[0, 0], [0, 0]])
 
 
