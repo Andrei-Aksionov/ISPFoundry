@@ -53,7 +53,7 @@ Where:
 * $I(x,y)$: True light intensity (photons)
 * $n(x,y)$: Sensor noise
 
-To normalize the data for the rest of the pipeline, we apply per-channel subtraction followed by an optional scale to a $[0, 1]$ range:
+To normalize the data for the rest of the pipeline, we apply per-channel subtraction followed by an optional scale to a $\lbrack 0, 1 \rbrack$ range:
 
 <br>
 
