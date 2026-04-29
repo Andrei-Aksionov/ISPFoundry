@@ -1,136 +1,125 @@
 # Black Level Subtraction
 
-## What is Black Level?
+A fundamental calibration step that removes electronic offsets to ensure photometric linear accuracy.
 
-The **black level** (also known as dark level or pedestal) is a constant voltage offset introduced by the camera sensor's readout electronics. Even when no light reaches the sensor, the output signal is not zero due to:
+The [HDR+ dataset](https://hdrplusdata.org/dataset.html) provides specific per-channel black level constants. Without removing this "pedestal," every subsequent calculation in the ISP, from white balance to merging, will be mathematically corrupted by a constant error term.
 
-- **Electronic bias**: ADCs require a positive voltage for proper operation.
-- **Amplifier offsets**: Signal amplifiers add DC offsets in the readout chain.
-- **Dark current**: Thermally generated electrons create a baseline signal.
-- **Manufacturing variations**: Each camera has unique electronic characteristics.
+<br>
 
-This offset ensures the sensor operates in a valid voltage range but must be removed for accurate image processing.
+## The Nature of Black Level
 
-## Why Subtract Black Level?
+The black level (pedestal) is a constant voltage offset introduced by the sensor's readout electronics. Even in total darkness, the sensor output is non-zero due to a combination of physical and electronic factors:
 
-Black level subtraction is essential for several reasons:
+**Electronic Bias** <br>
+Analog-to-Digital Converters (ADCs) require a baseline positive voltage for stable operation.
 
-### 1. Photometric Accuracy
+**Dark Current** <br>
+Thermally generated electrons that accumulate in the pixels, creating a baseline signal independent of light.
 
-Pixel values should directly represent light intensity. A value of 0 must correspond to zero photons. The black level shifts all values upward, violating this principle.
+**Readout Artifacts** <br>
+Amplifier offsets and manufacturing variations unique to each sensor's electronic characteristics.
 
-### 2. Linear Sensor Response
+<br>
 
-The raw sensor output follows:
+## Visual Impact
 
-$$ RAW(x,y) = BL + k \cdot I(x,y) + n(x,y) $$
+Failing to subtract the black level results in immediate and visible degradation of the final image. Because the "zero point" is misaligned, the entire tonal range is shifted.
+
+**Shadow Rendering** <br>
+Pure blacks appear as mid-gray, leading to a "washed out" look where shadows lose depth and fine detail is buried in the incorrect offset.
+
+**Contrast and Dynamic Range** <br>
+The effective contrast is reduced because the bottom of the histogram is artificially lifted, compressing the available space for real light data.
+
+**Downstream Corruption** <br>
+Operations like white balance, color correction, and gamma mapping assume a true zero point. Applying them to offset data causes color casts in dark areas, incorrect tone curves, and artifacts in low-light regions.
+
+<br>
+
+## Mathematical Foundation
+
+The raw sensor output is a linear combination of signal, offset, and noise. To recover true light intensity, we must isolate the signal component.
+
+<br>
+
+$$\large RAW(x,y) = BL + k \cdot I(x,y) + n(x,y) $$
+
+<br>
 
 Where:
 
-- $RAW(x,y)$: Raw pixel value at position $(x,y)$
-- $BL$: Electronic offset (constant per channel)
-- $k$: Sensor gain (conversion factor)
-- $I(x,y)$: Light intensity (photons)
-- $n(x,y)$: Sensor noise
+* $BL$: Electronic offset (the black level)
+* $k$: Sensor gain (conversion factor)
+* $I(x,y)$: True light intensity (photons)
+* $n(x,y)$: Sensor noise
 
-To recover the true light intensity, we must subtract the black level:
+To normalize the data for the rest of the pipeline, we apply per-channel subtraction followed by an optional scale to a $\lbrack 0, 1 \rbrack$ range:
 
-$$ I'(x,y) = RAW(x,y) - BL $$
+<br>
 
-### 3. Correct Shadow Rendering
+$$\large P_{norm}(x, y) = \frac{RAW(x, y) - BL_c}{WL - BL_c}$$
 
-Without subtraction:
+<br>
 
-- Blacks appear as mid-gray.
-- Contrast is reduced.
-- Shadows lose detail due to incorrect offset.
+*Note:* $\large WL$ *represents the White Level (saturation point), ensuring the usable signal range is mapped to a unit scale.*
 
-### 4. Enables Downstream Processing
+<br>
 
-Operations like white balance, color correction, and gamma mapping assume a true zero point. Applying them to offset data causes:
+## Pipeline Priority
 
-- Color casts in dark areas.
-- Incorrect tone curves.
-- Artifacts in low-light regions.
+Black level subtraction **must be the first step** in the ISP pipeline. Because many downstream operations are multiplicative, applying them before subtraction creates non-linear artifacts.
 
-## Pipeline Order
-
-Black level subtraction **must be the first step** in any ISP pipeline:
-
-1. ⭐ **Black Level Subtraction** (mandatory)
+1. ⇨ **Black Level Subtraction** (Mandatory) ⇦
 2. Lens Shading Correction
-3. Align and Merge burst of images
+3. Align and Merge
 4. White Balance
 5. Demosaicing
-6. ... Remaining steps
 
-### Why First?
+**The Multiplication Error** <br>
+If White Balance ($k$) is applied before subtraction, the offset itself is scaled, introducing a permanent color cast:
 
-- Corrects a fundamental sensor artifact present in raw ADC data.
-- Ensures all subsequent operations (multiplicative or additive) work on true light values.
-- Prevents errors like spatially varying offsets from lens shading or color-dependent shifts from white balance.
+<br>
 
-**Example**: White balance scales channels multiplicatively. On offset data:
-$$P' = k \cdot (BL + I) = k \cdot BL + k \cdot I$$
-This adds a color-dependent offset, corrupting neutrality.
+$$\large P' = k \cdot (BL + I) = k \cdot BL + k \cdot I$$
 
-## Mathematical Details
+<br>
 
-### Per-Channel Subtraction
+## Implementation Details
 
-For RGGB Bayer CFA, black levels differ per color channel:
+For an RGGB Bayer CFA, black levels are rarely uniform across the sensor. They are typically stored as a $2 \times 2$ matrix and applied based on the pixel's $(x, y)$ coordinate:
 
-$$BL = \begin{bmatrix} BL_R & BL_{G_r} \\\\ BL_{G_b} & BL_B \end{bmatrix}$$
+<br>
 
-Applied per pixel based on its $(x, y)$ position in the Bayer grid:
-$$P(x, y) = RAW(x, y) - BL_c$$
+$$\large BL = \begin{bmatrix} BL_R & BL_{G_r} \\\\ BL_{G_b} & BL_B \end{bmatrix}$$
 
-Where $c \in \{R, G_r, G_b, B\}$.
+<br>
 
-### Normalization (Optional)
+**Data Sourcing** <br>
+Always prioritize metadata (EXIF/DNG tags) over image-based estimation. Black levels are calibrated constants from the manufacturer, not variables derived from the scene's minimum pixel value.
 
-After subtraction, the image is often normalized to a `[0, 1]` range using the **White Level** ($WL$), which represents the sensor's saturation point:
+<br>
 
-$$P_{norm}(x, y) = \frac{P(x, y)}{WL - BL_c}$$
+## Technical Clarifications
 
-This ensures that the "useful" signal range (from black to saturation) is mapped to unit scale.
+**Scene Minimums** <br>
+Never use the image's minimum value as the black level. This value is influenced by noise and scene content; the black level is a hardware constant.
 
-But subtraction alone is often sufficient for linear pipelines.
+**Negative Values** <br>
+Do not clip negative values that appear after subtraction. Noise is zero-mean; these negative fluctuations are essential for maintaining statistical accuracy during the **Merge** and **Denoise** stages.
 
-## How to Obtain Black Levels
+**Color Neutrality** <br>
+Applying white balance before subtraction is a common error. Since channels have different gains, scaling the offset will shift the "dark point" of the image toward a specific color.
 
-- **From metadata**: EXIF/DNG tags like "BlackLevel" (string or array).
-- **Fallback**: Estimate from image minima per CFA channel (less accurate).
-- **Never use**: Global image minimum, as it's scene-dependent.
+**Global vs. Per-Channel** <br>
+Modern sensors utilize separate amplifiers for different color channels. Treating the black level as a single global value usually results in a faint green or magenta tint in the shadows.
 
-## Common Misconceptions
+<br>
 
-### "Subtract the image's minimum value instead"
+---
 
-**Incorrect**. The minimum pixel is influenced by noise, hot pixels, and scene content. Black level is a calibrated constant from sensor characterization, not per-image.
+### Summary
 
-### "Only needed for scientific imaging"
-
-**Incorrect**. Mandatory for all raw processing: photography, video, CV, ML. Without it, colors shift, dynamic range compresses, and algorithms fail.
-
-### "Apply white balance before subtraction"
-
-**Incorrect**. White balance is multiplicative; on offset data, it scales the black level, introducing color casts. Always subtract first.
-
-### "Black levels are identical across channels"
-
-**Incorrect**. Channels often differ due to separate amplifiers and filter variations. Use per-channel values from metadata when available.
-
-### "Negative values after subtraction are bad"
-
-**Incorrect**. Noise is zero-mean; negatives represent valid fluctuations below the mean dark level. Preserve them for accurate statistics in denoising/merging.
-
-## Summary
-
-Black Level Subtraction:
-
-- Removes electronic offset from sensor readout
-- Ensures zero pixel value = zero light
-- Must be applied per-channel (R, Gr, Gb, B)
-- First operation in the ISP pipeline (mandatory)
-- Prerequisite for all color and tone processing
+* Subtraction is the absolute first operation.
+* Values are pulled from DNG/EXIF metadata.
+* Subtraction is performed per-channel ($R, G_r, G_b, B$).
+* Negative values are preserved for downstream merging.
