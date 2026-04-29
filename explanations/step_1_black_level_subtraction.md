@@ -61,7 +61,7 @@ $$\large P_{norm}(x, y) = \frac{RAW(x, y) - BL_c}{WL - BL_c}$$
 
 <br>
 
-*Note: $WL$ represents the White Level (saturation point), ensuring the usable signal range is mapped to a unit scale.*
+*Note:* $\large WL$ *represents the White Level (saturation point), ensuring the usable signal range is mapped to a unit scale.*
 
 <br>
 
