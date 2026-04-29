@@ -40,7 +40,11 @@ Operations like white balance, color correction, and gamma mapping assume a true
 
 The raw sensor output is a linear combination of signal, offset, and noise. To recover true light intensity, we must isolate the signal component.
 
+<br>
+
 $$\large RAW(x,y) = BL + k \cdot I(x,y) + n(x,y) $$
+
+<br>
 
 Where:
 
@@ -51,7 +55,11 @@ Where:
 
 To normalize the data for the rest of the pipeline, we apply per-channel subtraction followed by an optional scale to a $[0, 1]$ range:
 
+<br>
+
 $$\large P_{norm}(x, y) = \frac{RAW(x, y) - BL_c}{WL - BL_c}$$
+
+<br>
 
 *Note: $WL$ represents the White Level (saturation point), ensuring the usable signal range is mapped to a unit scale.*
 
@@ -70,6 +78,8 @@ Black level subtraction **must be the first step** in the ISP pipeline. Because 
 **The Multiplication Error** <br>
 If White Balance ($k$) is applied before subtraction, the offset itself is scaled, introducing a permanent color cast:
 
+<br>
+
 $$\large P' = k \cdot (BL + I) = k \cdot BL + k \cdot I$$
 
 <br>
@@ -78,7 +88,11 @@ $$\large P' = k \cdot (BL + I) = k \cdot BL + k \cdot I$$
 
 For an RGGB Bayer CFA, black levels are rarely uniform across the sensor. They are typically stored as a $2 \times 2$ matrix and applied based on the pixel's $(x, y)$ coordinate:
 
+<br>
+
 $$\large BL = \begin{bmatrix} BL_R & BL_{G_r} \\\\ BL_{G_b} & BL_B \end{bmatrix}$$
+
+<br>
 
 **Data Sourcing** <br>
 Always prioritize metadata (EXIF/DNG tags) over image-based estimation. Black levels are calibrated constants from the manufacturer, not variables derived from the scene's minimum pixel value.
@@ -101,9 +115,11 @@ Modern sensors utilize separate amplifiers for different color channels. Treatin
 
 <br>
 
+---
+
 ### Summary
 
-- Subtraction is the absolute first operation.
-- Values are pulled from DNG/EXIF metadata.
-- Subtraction is performed per-channel ($R, G_r, G_b, B$).
-- Negative values are preserved for downstream merging.
+* Subtraction is the absolute first operation.
+* Values are pulled from DNG/EXIF metadata.
+* Subtraction is performed per-channel ($R, G_r, G_b, B$).
+* Negative values are preserved for downstream merging.
