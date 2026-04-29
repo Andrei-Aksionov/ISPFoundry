@@ -1,128 +1,124 @@
 # Lens Shading Correction
 
-## What is Lens Shading?
+A spatial calibration process that compensates for optical brightness and color falloff from the center of the sensor to its periphery.
 
-**Lens shading** (also known as vignetting or shading rolloff) is the gradual reduction in brightness and color accuracy from the center of an image toward its edges and corners. This occurs because the lens and sensor do not capture light uniformly across the entire frame.
+In the [HDR+ dataset](https://hdrplusdata.org/dataset.html), lens shading is provided as a low-resolution metadata grid. Without this correction, the corners of the image would not only appear darker (vignetting) but would also exhibit significant color tints due to the wavelength-dependent nature of light attenuation through glass.
 
-The effect is caused by:
+<br>
 
-* **Law (Natural Vignetting)**: Light hitting the sensor at an angle travels further and spreads over a larger area, reducing intensity.
-* **Mechanical Vignetting**: Physical obstructions like lens barrels or hoods block light at extreme angles.
-* **Pixel Vignetting (CRA)**: Microlenses on the sensor are less efficient at capturing light arriving at a high Chief Ray Angle (CRA).
-* **Wavelength Dependence**: Different colors (R, G, B) attenuate at different rates, leading to spatially varying color casts.
+## The Nature of Lens Shading
 
----
+Lens shading, or vignetting, is the gradual reduction in intensity and color accuracy toward the edges of the frame. It is the cumulative result of several physical and optical phenomena:
 
-## Why Correct Lens Shading?
+**Natural Vignetting** <br>
+Derived from the $cos^4 \theta$ law, where light hitting the sensor at an angle travels a longer distance and spreads over a larger area, reducing its energy density.
 
-### 1. Uniform Illumination
+**Mechanical Vignetting** <br>
+Physical obstructions within the optical path, such as lens barrels or hoods, that block light rays arriving at extreme angles.
 
-A uniformly lit scene (like a white wall) should appear uniform in the raw data. Lens Shading Correction (LSC) equalizes the signal so the corners match the center brightness.
+**Pixel Vignetting** <br>
+The Chief Ray Angle (CRA) effect, where the sensor's microlenses become less efficient at capturing photons that arrive at steep angles relative to the pixel surface.
 
-### 2. Spatially Consistent Color
+<br>
 
-Because shading is wavelength-dependent, the corners often exhibit "color tints" (e.g., greenish or magenta corners). LSC applies per-channel gains to ensure color neutrality across the frame.
+## Visual and Analytical Impact
 
-### 3. Improves Downstream Accuracy
+Correcting lens shading is not merely an aesthetic choice; it is a prerequisite for the mathematical assumptions made by the rest of the ISP.
 
-Operations like **White Balance**, **Demosaicing**, and **Color Correction (CCM)** assume the sensor's response is spatially uniform. Without LSC:
+**Uniform Illumination** <br>
+LSC equalizes the signal so that a uniformly lit scene (such as a white wall) is represented by uniform pixel values across the entire frame.
 
-* White balance might only be accurate in the center.
-* Demosaicing can introduce color fringing in dark corners.
+**Spatially Consistent Color** <br>
+Because different wavelengths attenuate at different rates, corners often exhibit greenish or magenta tints. LSC applies per-channel gains to restore color neutrality.
 
-### 4. Maximizes Dynamic Range
+**Downstream Accuracy** <br>
+Operations like White Balance and Color Correction (CCM) assume the sensor response is spatially uniform. Without LSC, white balance may only be accurate in the center of the image.
 
-By "boosting" the signal in the corners, LSC ensures that the full bit-depth of the sensor is utilized effectively across the entire image area.
+<br>
 
----
+## Mathematical Foundation
 
-## Pipeline Order
+We model the observed pixel value $P(x,y)$ as the true intensity $I(x,y)$ modulated by a spatially varying vignetting factor $V(x,y)$. To recover the true signal, we multiply by the **Lens Shading Map (LSM)**.
 
-Lens shading correction **must occur after black level subtraction** but before white balance:
+<br>
 
-1. Black Level Subtraction (mandatory)
-2. ⭐ **Lens Shading Correction**
-3. Demosaicing
+$$\large I(x,y) = P(x,y) \cdot LSM(x,y), \quad \text{where } LSM(x,y) = \frac{1}{V(x,y)}$$
+
+<br>
+
+For a Bayer sensor, this correction must be applied to all four color channels ($R, G_r, G_b, B$) independently to account for color-specific shading:
+
+<br>
+
+$$\large \begin{bmatrix} R' \\\\ G_r' \\\\ G_b' \\\\ B' \end{bmatrix} = \begin{bmatrix} LSM_R & 0 & 0 & 0 \\\\ 0 & LSM_{G_r} & 0 & 0 \\\\ 0 & 0 & LSM_{G_b} & 0 \\\\ 0 & 0 & 0 & LSM_B \end{bmatrix} \cdot \begin{bmatrix} R \\\\ G_r \\\\ G_b \\\\ B \end{bmatrix}$$
+
+<br>
+
+## Acquisition and Calibration
+
+Obtaining an accurate Lens Shading Map (LSM) requires isolating the sensor's spatial response from the scene content.
+
+**Factory Calibration** <br>
+Sensors are pointed at a calibrated uniform light source (an integrating sphere). The gain required to "flatten" the resulting image is calculated and stored as a reference grid.
+
+**DNG Metadata** <br>
+Professional raw files often embed a "GainMap" or "OpcodeList2." These contain the specific grid needed to correct that specific lens-sensor combination at that moment of capture.
+
+**Flat-Fielding** <br>
+A manual calibration technique involving photographing a neutral gray card or a clear, uniform sky to generate a reference frame for gain calculation.
+
+**Synthetic Modeling** <br>
+When no map is available, radial polynomials ($1 + ar^2 + br^4$) are used to approximate the falloff based on the distance from the optical center.
+
+<br>
+
+## Implementation Details
+
+Because vignetting is a smooth, low-frequency phenomenon, storing a full-resolution gain map is inefficient. Instead, maps are stored as low-resolution grids (e.g., $17 \times 13$).
+
+**Upsampling** <br>
+To apply the map to the raw image, the grid must be upsampled to full resolution. **Bilinear interpolation** is the standard approach, providing smooth transitions and preventing the introduction of high-frequency artifacts into the raw data.
+
+<br>
+
+## Pipeline Priority
+
+Lens shading correction **must occur after black level subtraction** but before the global white balance is applied.
+
+1. Black Level Subtraction
+2. ⇨ **Lens Shading Correction** ⇦
+3. Align and Merge
 4. White Balance
-5. ... Remaining steps
+5. Demosaicing
 
-### Why After Black Level Subtraction?
+**The Offset Error** <br>
+LSC is a multiplicative gain. If applied before subtracting the black level (an additive offset), you scale the electronic noise pedestal, creating a spatially varying black level that is nearly impossible to correct later:
 
-LSC is a **multiplicative gain**. If applied before subtracting the black level (an additive offset), you scale the offset itself:
+<br>
 
-$$P_{wrong} = LSM(x,y) \cdot (I(x,y) + BL) = LSM(x,y) \cdot I(x,y) + LSM(x,y) \cdot BL$$
+$$\large P_{wrong} = LSM(x,y) \cdot (I(x,y) + BL) = LSM \cdot I + LSM \cdot BL$$
 
-This creates a **spatially varying black level**, which is nearly impossible to remove later and causes severe color shifts in shadows.
+<br>
 
-### Why Before White Balance?
+## Technical Clarifications
 
-LSC corrects for **hardware/optical** non-uniformity, while White Balance corrects for **lighting** conditions. Correcting the sensor's spatial response first provides a "flat" field for the global white balance gains to work on.
+**Noise Amplification** <br>
+LSC increases the signal in the corners, which inherently boosts the noise floor in those regions. This is why corners often appear grainier than the center in low-light shots.
 
----
+**Demosaicing Order** <br>
+LSC should never be performed after demosaicing. Shading is a raw Bayer-level artifact; demosaicing uncorrected data "smears" the spatial errors across color channels, leading to irreversible fringing.
 
-## Mathematical Details
+**Optical Dependencies** <br>
+A single map is rarely sufficient for all conditions. Shading characteristics change significantly based on the **Aperture** and, in the case of zoom lenses, the **Focal Length**.
 
-### The Correction Model
-
-We model the observed pixel value $P(x,y)$ as the true intensity $I(x,y)$ multiplied by a vignetting factor $V(x,y)$:
-
-$$P(x,y) = I(x,y) \cdot V(x,y)$$
-
-To recover the true signal, we multiply by the **Lens Shading Map (LSM)**, which is the inverse of the vignetting:
-
-$$I(x,y) = P(x,y) \cdot LSM(x,y), \quad \text{where } LSM(x,y) = \frac{1}{V(x,y)}$$
-
-### Per-Channel Gain
-
-For a Bayer sensor, the correction is applied to all four channels independently:
-
-$$\begin{bmatrix} R' \\\\ Gr' \\\\ Gb' \\\\ B' \end{bmatrix} = \begin{bmatrix} LSM_R & 0 & 0 & 0 \\\\ 0 & LSM_{Gr} & 0 & 0 \\\\ 0 & 0 & LSM_{Gb} & 0 \\\\ 0 & 0 & 0 & LSM_B \end{bmatrix} \cdot \begin{bmatrix} R \\\\ Gr \\\\ Gb \\\\ B \end{bmatrix}$$
+<br>
 
 ---
 
-## The Lens Shading Map (LSM)
-
-### Low-Resolution Storage
-
-Vignetting is a low-frequency, smooth phenomenon. Therefore, LSMs are typically stored as low-resolution grids (e.g., $17 \times 13 \times 4$) to save space.
-
-### Upsampling
-
-To apply the map to a full-resolution image, the LSM must be **upsampled** to the image dimensions. **Bilinear interpolation** is the standard method, as it ensures smooth transitions without introducing ringing artifacts.
-
----
-
-## How to Obtain LSMs
-
-* **Calibration (Factory)**: Point the camera at a calibrated uniform light source (integrating sphere) and calculate the gain needed to make the image flat.
-* **DNG Metadata**: Professional RAW files often embed the "OpcodeList2" or "GainMap" containing the correction grid.
-* **Flat-Fielding**: Photographing a neutral gray card or a clear sky can provide a reference for manual calibration.
-* **Synthetic Models**: Using radial polynomials ($1 + ar^2 + br^4$) to approximate the falloff when no map is available.
-
----
-
-## Common Misconceptions
-
-### "LSC can be done after demosaicing"
-
-**Incorrect**. Shading happens at the raw Bayer level and is color-channel specific. If you demosaic first, you mix uncorrected color values, making accurate correction much harder.
-
-### "LSC increases noise"
-
-**True, but necessary**. Since you are multiplying (boosting) the signal in the corners, you are also boosting the noise floor. This is why corner regions often appear noisier than the center.
-
-### "A single map works for all lenses"
-
-**Incorrect**. Each lens has unique optical properties. Even for the same lens, shading changes based on **Aperture (f-stop)** and **Focal Length (zoom)**.
-
----
-
-## Summary
-
-Lens Shading Correction:
+### Summary
 
 * Compensates for optical brightness and color falloff (vignetting).
 * Uses a multiplicative 4-channel gain map (LSM).
-* **Must** be applied after black level subtraction.
+* **Must** be applied after black level subtraction and before white balance.
 * Requires bilinear upsampling for smooth, per-pixel application.
-* Is essential for spatial color consistency and uniform exposure.
+* Essential for maintaining spatial color consistency and uniform exposure.
