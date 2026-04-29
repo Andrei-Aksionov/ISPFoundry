@@ -112,6 +112,7 @@ class Metadata:
 
         # --- Stage 2: Specific Value Logic ---
         self._check_string_fields()  # Catches "" or " "
+        self._check_path_fields()  # Catches "" or "."
         self._check_numpy_arrays()  # Catches size 0
 
         # --- Stage 3: ISP Domain Logic ---
@@ -172,6 +173,15 @@ class Metadata:
 
             if isinstance(value, str) and not value.strip():
                 raise ValueError(f"Field '{field.name}' cannot be an empty or whitespace-only string.")
+
+    def _check_path_fields(self) -> None:
+        """Value validation for Path objects."""  # noqa: DOC501
+        for f in fields(self):
+            value = getattr(self, f.name)
+
+            # Ensure the path isn't just an empty string passed to Path()
+            if isinstance(value, Path) and (str(value).strip() in (".", "")):
+                raise ValueError(f"Field '{f.name}' appears to be an empty or invalid Path.")
 
     def _check_numpy_arrays(self) -> None:
         """

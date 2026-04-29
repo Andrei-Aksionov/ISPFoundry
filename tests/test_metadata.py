@@ -56,6 +56,18 @@ class TestAutomatedStructuralChecks:
         with pytest.raises(ValueError, match="cannot be an empty or whitespace-only string"):
             Metadata(**valid_params)
 
+    def test_path_type_enforcement(self, valid_params):
+        """Verifies that passing a string to file_path raises TypeError."""
+        valid_params["file_path"] = "/path/to/image.dng"
+        with pytest.raises(TypeError, match="must be of type .*Path"):
+            Metadata(**valid_params)
+
+    def test_empty_path_check(self, valid_params):
+        """Verifies that an empty Path object raises ValueError."""
+        valid_params["file_path"] = Path("")
+        with pytest.raises(ValueError, match="empty or invalid Path"):
+            Metadata(**valid_params)
+
     def test_numpy_type_enforcement(self, valid_params):
         """
         Verifies that passing a list instead of ndarray raises TypeError.
