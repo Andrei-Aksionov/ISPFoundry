@@ -106,18 +106,21 @@ class Metadata:
 
     def __post_init__(self) -> None:
         """Validates the metadata fields to ensure ISP steps will not fail."""
-        # Structural checks
+        # --- Stage 1: Structural & Type Integrity ---
         self._check_non_optional_fields()
         self._check_field_types()
-        self._check_string_fields()
-        self._check_numpy_arrays()
-        # "Lock" numpy arrays
-        self._make_numpy_arrays_readonly()
 
-        # ISP logic
+        # --- Stage 2: Specific Value Logic ---
+        self._check_string_fields()  # Catches "" or " "
+        self._check_numpy_arrays()  # Catches size 0
+
+        # --- Stage 3: ISP Domain Logic ---
         self._validate_geometry()
         self._validate_levels()
         self._validate_isp_requirements()
+
+        # --- Stage 4: Locking ---
+        self._make_numpy_arrays_readonly()  # Deep freeze
 
     def _check_non_optional_fields(self) -> None:
         """Iterates through dataclass fields and raises TypeError if a non-Optional field is None."""  # noqa: DOC501
@@ -167,16 +170,7 @@ class Metadata:
         for field in fields(self):
             value = getattr(self, field.name)
 
-            # Skip if the value is None (we handle mandatory None in the other check)
-            if value is None:
-                continue
-
-            # Determine if 'str' is the type or part of a Union (e.g., str | None)
-            is_str_type = field.type is str or (
-                get_origin(field.type) in (Union, getattr(types, "UnionType", None)) and str in get_args(field.type)
-            )
-
-            if is_str_type and isinstance(value, str) and not value.strip():
+            if isinstance(value, str) and not value.strip():
                 raise ValueError(f"Field '{field.name}' cannot be an empty or whitespace-only string.")
 
     def _check_numpy_arrays(self) -> None:
@@ -190,22 +184,8 @@ class Metadata:
         for field in fields(self):
             value = getattr(self, field.name)
 
-            if value is None:
-                continue
-
-            # Check if the type hint is np.ndarray or contains np.ndarray (Union)
-            is_numpy_type = field.type is np.ndarray or (
-                get_origin(field.type) in (Union, getattr(types, "UnionType", None))
-                and np.ndarray in get_args(field.type)
-            )
-
-            if is_numpy_type:
-                # Check for type mismatch (e.g., someone passed a list)
-                if not isinstance(value, np.ndarray):
-                    raise TypeError(f"Field '{field.name}' must be a numpy.ndarray, but got {type(value)}.")
-                # Check for empty array
-                if value.size == 0:
-                    raise ValueError(f"Field '{field.name}' is an empty NumPy array (size 0).")
+            if isinstance(value, np.ndarray) and value.size == 0:
+                raise ValueError(f"Field '{field.name}' is an empty NumPy array (size 0).")
 
     def _make_numpy_arrays_readonly(self) -> None:
         """Sets the WRITEABLE flag to False for all ndarray fields."""
